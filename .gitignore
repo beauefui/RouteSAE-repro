@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
+.venv
+env/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+wandb/
+
+# Model weights (太大不上传)
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Data (不上传数据)
+data/
+*.jsonl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Old code (如果不想上传原始代码)
+# old/

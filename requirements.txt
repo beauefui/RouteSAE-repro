@@ -1,0 +1,26 @@
+# requirements.txt
+# PyTorch
+torch>=2.0.0
+
+# Transformers
+transformers>=4.40.0
+accelerate>=0.20.0
+datasets>=2.14.0
+
+# 科学计算
+numpy>=1.24.0
+scipy>=1.10.0
+
+# 训练工具
+tqdm>=4.65.0
+wandb>=0.15.0
+
+# OpenAI API
+openai>=1.0.0
+tiktoken>=0.5.0
+
+# 配置
+pyyaml>=6.0
+
+# 日志
+colorlog>=6.7.0
