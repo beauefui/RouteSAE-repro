@@ -86,7 +86,7 @@ graph TD
     LLM[Llama-3.2 LLM] -->|Get Activations| Applier
     Dataset[OpenWebText] -->|Iterate| Applier
     
-    subgraph Feature Extraction (apply.py)
+    subgraph FE ["Feature Extraction (apply.py)"]
     Applier -->|Filter > Threshold| Acts[高激活特征]
     Acts -->|Extract Window| Contexts[上下文片段]
     Contexts -->|Save JSON| JSON[contexts.json]
@@ -94,7 +94,7 @@ graph TD
     
     JSON -->|Load| Interpreter
     
-    subgraph Interpretation (interpret.py)
+    subgraph INT ["Interpretation (interpret.py)"]
     Interpreter -->|Sample Features| Samples[待解释特征]
     Samples -->|Construct Prompt| Prompt
     Prompt -->|API Call| GPT4[GPT-4o]
