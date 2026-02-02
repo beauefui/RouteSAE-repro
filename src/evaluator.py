@@ -38,7 +38,8 @@ class Evaluator:
         logger.info(f"Initializing Evaluator for {cfg.model}")
         self.tokenizer, self.language_model = get_language_model(cfg.model_path, self.device)
         self.dataloader = create_dataloader(
-            cfg.data_path, self.tokenizer, cfg.batch_size, cfg.max_length
+            cfg.data_path, self.tokenizer, cfg.batch_size, cfg.max_length,
+            max_samples=cfg.max_samples
         )
         
         sae_name = os.path.splitext(os.path.basename(cfg.SAE_path))[0]
@@ -89,6 +90,7 @@ class Evaluator:
                 self.cfg, batch, self.language_model, self.device
             )
             x, _, _ = pre_process(hidden_states)
+            x = x.float()  # 确保 float32，因为 LLM 可能输出 bfloat16
 
             # Forward pass with SAE
             if self.cfg.model == 'RouteSAE':

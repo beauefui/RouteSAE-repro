@@ -253,8 +253,8 @@ class RouteSAE(nn.Module):
         infer_k: Optional[int] = None,
         theta: Optional[float] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # 只取中间层
-        x = x[:, :, self.start_layer:self.end_layer, :]
+        # 注意: 输入 x 已经在 get_outputs 中被切片为中间层 [batch, seq, n_routed_layers, hidden]
+        # 不需要再次切片
         
         # 1. 计算路由权重
         router_weights = self.get_router_weights(x, aggre)

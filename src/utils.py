@@ -110,7 +110,6 @@ def get_language_model(model_path: str, device: torch.device) -> Tuple[AutoToken
     language_model = AutoModelForCausalLM.from_pretrained(
         model_path, 
         trust_remote_code=True, 
-        return_dict_in_generate=True, 
         output_hidden_states=True
     ).to(device)
     
@@ -243,10 +242,13 @@ def hook_SAE(
         else:
             unpack_outputs = [outputs]
         
+        original_dtype = unpack_outputs[0].dtype  # 保存原始数据类型
+        
         if is_zero:
             unpack_outputs[0] = torch.zeros_like(unpack_outputs[0])
         else:
             x, mu, std = pre_process(unpack_outputs[0])
+            x = x.float()  # 转为 float32 进行 SAE 计算
             latents = model.encode(x, cfg.infer_k, cfg.theta)
 
             if set_high:
@@ -264,7 +266,8 @@ def hook_SAE(
                         latents[..., latent_idx] /= val
 
             x_hat = model.decode(latents)
-            unpack_outputs[0] = x_hat * std + mu
+            reconstructed = x_hat * std + mu
+            unpack_outputs[0] = reconstructed.to(original_dtype)  # 还原数据类型
 
         return tuple(unpack_outputs) if isinstance(outputs, tuple) else unpack_outputs[0]
 
@@ -309,12 +312,15 @@ class RouteHook:
         if output_tensor.shape[1] != layer_mask.shape[1]:
             return outputs
 
+        original_dtype = output_tensor.dtype # 保存原始数据类型
+
         if self.is_zero:
             replace_mask = layer_mask.unsqueeze(-1).expand_as(output_tensor)
             output_tensor = output_tensor.clone()
             output_tensor[replace_mask] = 0
         else:
             x, mu, std = pre_process(output_tensor)
+            x = x.float() # 转为 float32 进行 SAE 计算
             latents = self.model.sae.encode(x, self.cfg.infer_k, self.cfg.theta)
 
             for (idx, val, mode) in self.set_high:
@@ -331,6 +337,7 @@ class RouteHook:
 
             x_hat = self.model.sae.decode(latents)
             reconstruct = x_hat * std + mu
+            reconstruct = reconstruct.to(original_dtype) # 还原数据类型
 
             replace_mask = layer_mask.unsqueeze(-1).expand_as(reconstruct)
             output_tensor = output_tensor.clone()

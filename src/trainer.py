@@ -37,7 +37,8 @@ class Trainer:
         logger.info(f"Loading LLM: {cfg.model_path}")
         self.tokenizer, self.language_model = get_language_model(cfg.model_path, self.device)
         self.dataloader = create_dataloader(
-            cfg.data_path, self.tokenizer, cfg.batch_size, cfg.max_length
+            cfg.data_path, self.tokenizer, cfg.batch_size, cfg.max_length,
+            max_samples=cfg.max_samples
         )
 
         # 构建实验名称
@@ -92,6 +93,7 @@ class Trainer:
                 )
                 
                 x, _, _ = pre_process(hidden_states)
+                x = x.float()  # 确保 float32，因为 LLM 可能输出 bfloat16
 
                 # Forward pass
                 if self.cfg.model == 'RouteSAE':
