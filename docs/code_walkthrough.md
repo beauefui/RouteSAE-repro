@@ -13,9 +13,12 @@
 5. [utils.py 详解](#utilspy-详解)
 6. [trainer.py 详解](#trainerpy-详解)
 7. [evaluator.py 详解](#evaluatorpy-详解)
-8. [interpreter.py 详解](#interpreterpy-详解)
-9. [训练流程](#训练流程)
-10. [评估流程](#评估流程)
+8. [applier.py 详解](#applierpy-详解)
+9. [interpreter.py 详解](#interpreterpy-详解)
+10. [训练流程](#训练流程)
+11. [评估流程](#评估流程)
+12. [应用流程 (Feature Extraction)](#应用流程-feature-extraction)
+13. [解释流程 (Interpretation)](#解释流程-interpretation)
 
 ---
 
@@ -28,6 +31,7 @@ RouteSAE-repro/
 │   ├── model.py          # [Core] SAE 模型定义 (TopK, RouteSAE)
 │   ├── data.py           # [Core] 数据加载与流式处理
 │   ├── utils.py          # [Core] 通用工具库 (最为关键)
+│   ├── applier.py        # [Analysis] 特征提取器
 │   ├── trainer.py        # [Flow] 训练控制器
 │   ├── evaluator.py      # [Flow] 评估控制器
 │   └── interpreter.py    # [Analysis] 特征解释接口
@@ -37,9 +41,13 @@ RouteSAE-repro/
 │   ├── download_model.sh # 模型下载工具
 │   ├── train_topk.sh     # TopK 训练入口脚本
 │   ├── train_routesae.sh # RouteSAE 训练入口脚本
-│   └── evaluate_compare.sh # 评估对比入口脚本
+│   ├── evaluate_compare.sh # 评估对比入口脚本
+│   ├── apply.sh          # 特征提取入口脚本
+│   └── interpret.sh      # 特征解释入口脚本
 ├── train.py              # Python 训练主入口
 ├── evaluate.py           # Python 评估主入口
+├── apply.py              # Python 特征提取入口
+├── interpret.py          # Python 特征解释入口
 └── requirements.txt      # 依赖包列表
 ```
 
@@ -47,7 +55,7 @@ RouteSAE-repro/
 
 ## 数据流总览
 
-### 核心训练数据流
+### 1. 核心训练数据流
 
 ```mermaid
 graph TD
@@ -68,6 +76,31 @@ graph TD
     
     Reconstruct -->|8. Loss Calc| Loss[Normalized MSE]
     Loss -->|9. Backward| Grads[参数更新]
+```
+
+### 2. 特征提取与解释流
+
+```mermaid
+graph TD
+    TrainedSAE[训练好的 SAE 模型] -->|Load Weights| Applier
+    LLM[Llama-3.2 LLM] -->|Get Activations| Applier
+    Dataset[OpenWebText] -->|Iterate| Applier
+    
+    subgraph Feature Extraction (apply.py)
+    Applier -->|Filter > Threshold| Acts[高激活特征]
+    Acts -->|Extract Window| Contexts[上下文片段]
+    Contexts -->|Save JSON| JSON[contexts.json]
+    end
+    
+    JSON -->|Load| Interpreter
+    
+    subgraph Interpretation (interpret.py)
+    Interpreter -->|Sample Features| Samples[待解释特征]
+    Samples -->|Construct Prompt| Prompt
+    Prompt -->|API Call| GPT4[GPT-4o]
+    GPT4 -->|Return| Explanation[语义解释 & 评分]
+    Explanation -->|Save| Result[interp_result.json]
+    end
 ```
 
 ---
@@ -502,30 +535,161 @@ def hook_RouteSAE(cfg, model, language_model, batch_layer_weights, ...):
 
 ---
 
+## applier.py 详解
+
+负责处理数据并提取 SAE 激活特征及其上下文。这一步是特征解释的前置步骤。
+
+### 1. Applier 类详解
+
+#### 1.1 初始化 `__init__`
+
+```python
+class Applier:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.device = torch.device(cfg.device)
+        
+        # 1. 初始化模型结构 (TopK 或 RouteSAE)
+        self.model = get_model(cfg.model, ...)
+
+        # 2. 加载预训练 SAE 权重
+        state_dict = torch.load(cfg.SAE_path, map_location=self.device)
+        self.model.load_state_dict(state_dict)
+        self.model.to(self.device)
+        self.model.eval()
+        
+        # 3. 延迟加载 LLM (get_context 时才加载)
+        self.tokenizer = None
+        self.language_model = None
+```
+
+#### 1.2 上下文提取 `get_context`
+
+```python
+    def get_context(self, threshold=10.0, max_length=64, ...):
+        # 1. 加载 LLM 和数据
+        if self.language_model is None:
+             self.tokenizer, self.language_model = get_language_model(...)
+             
+        dataloader = create_dataloader(...)
+        
+        # 2. 存储结构: latent_idx -> token_class -> heap
+        latent_context_map = defaultdict(lambda: defaultdict(list))
+        
+        # 定义辅助函数: find_sentence_bounds, process_and_store_context
+        
+        for batch in tqdm(dataloader):
+            # 获取 LLM 隐藏层状态
+            _, _, _, hidden_states = get_outputs(...)
+            
+            # 预处理 (归一化)
+            x, _, _ = pre_process(hidden_states)
+            
+            # [关键] 数据类型对齐: 确保 x 的 dtype 与 model 一致
+            model_dtype = next(self.model.parameters()).dtype
+            x = x.to(dtype=model_dtype)
+            
+            # SAE 前向
+            if RouteSAE:
+                _, _, latents, _, _ = self.model(x, ...)
+            else:
+                latents, _ = self.model(x, ...)
+            
+            # 找到激活 > threshold 的位置
+            positions = (latents > threshold)
+            
+            # 遍历 Batch 提取上下文
+            for i in range(batch_size):
+                activated_indices = torch.nonzero(positions[i], as_tuple=False)
+                for idx in activated_indices:
+                    seq_pos, latent_dim = idx[0].item(), idx[1].item()
+                    activation_value = latents[i, seq_pos, latent_dim].item()
+                    
+                    # 调用辅助函数处理并存储
+                    process_and_store_context(latent_dim, seq_pos, activation_value, tokens)
+                
+        # 3. 结果整理与过滤
+        # ... (按 lines 过滤，按 activation 排序) ...
+        
+        save_json(output_data, output_path)
+        return total_latents, output_path
+```
+
+---
+
 ## interpreter.py 详解
 
-### 自动化解释流程
+负责将提取出的特征上下文发送给 GPT-4 进行自动解释。
 
-1.  **收集激活 (`get_activations`)**:
-    *   遍历数据集，记录每个 Latent Dimension 激活值最大的 Top-10 样本。
-    *   保存 Token 及其上下文 Window。
+### 1. Interpreter 类详解
 
-2.  **构造 Prompt (`construct_prompt`)**:
-    ```text
-    We are analyzing feature #123.
-    It activates strongly on the following examples:
-    1. Token: " int" | Context: "for (int i=0..."
-    2. Token: " float" | Context: "public float calculate..."
-    
-    Question: What does this feature represent?
-    ```
+#### 1.1 核心逻辑 `run`
 
-3.  **调用 API (`call_api`)**:
-    *   使用 GPT-4o 进行推理。
+```python
+class Interpreter:
+    def run(self, data_path, sample_latents=100, ...):
+        # 1. 加载上下文数据
+        with open(data_path, 'r') as f:
+            data = json.load(f)
+            
+        # 2. 随机采样特征
+        latent_context_map = data.get('latent_context_map', {})
+        all_latents = list(latent_context_map.keys())
+        sampled_indices = random.sample(range(len(all_latents)), sample_size)
+        sampled_latents = [all_latents[i] for i in sorted(sampled_indices)]
+        
+        # 3. 初始化 OpenAI 客户端 (支持 OpenAI / AzureOpenAI)
+        api_key = self.cfg.api_key or os.environ.get("OPENAI_API_KEY")
+        if self.cfg.api_base:
+            client = AzureOpenAI(...) 
+        else:
+            client = OpenAI(...)      
+            
+        # 4. 循环调用 API
+        for idx, latent in enumerate(sampled_latents, 1):
+            # 获取该特征的所有上下文 tokens_info
+            
+            # [关键] 限制 Prompt 大小: 随机采样最多 20 个上下文
+            if len(tokens_info) > 20:
+                random.shuffle(tokens_info)
+                tokens_info = tokens_info[:20]
 
-4.  **解析结果 (`parse_response`)**:
-    *   提取类别: "Code Syntax / Variable Declaration"
-    *   提取分数: 5/5
+            prompt = self.construct_prompt(tokens_info)
+            
+            try:
+                # [速率限制] 避免 TPM 溢出
+                time.sleep(2) 
+                response = self.chat_completion(client, prompt)
+                
+                # 解析并存储结果
+                # ...
+                
+            except Exception as e:
+                logger.error(...)
+                continue
+            
+        # 5. 保存结果
+        save_json(output_data, output_path)
+        return avg_score, ...
+```
+
+#### 1.2 API 调用与重试 `chat_completion`
+
+```python
+    def chat_completion(self, client, prompt, max_retry=3):
+        for attempt in range(1, max_retry + 1):
+            try:
+                chat_completion = client.chat.completions.create(
+                    messages=[...],
+                    model=self.cfg.engine,
+                    max_tokens=128,  
+                    temperature=0.1,
+                )
+                return response_content
+            except Exception as e:
+                # 记录警告并重试
+                if attempt == max_retry: raise
+```
 
 ---
 
@@ -579,3 +743,42 @@ def hook_RouteSAE(cfg, model, language_model, batch_layer_weights, ...):
     *   NormMSE 越低，说明**重构越准**。
     *   KLDiv 越低，说明**对下游任务影响越小**。
     *   **结论**: RouteSAE 通常 KLDiv 远优于 TopK，证明了路由机制的有效性。
+
+---
+
+## 应用流程 (Feature Extraction)
+
+用于提取训练好的 SAE 特征在特定数据集上的激活情况。
+
+1.  **运行提取**:
+    ```bash
+    bash scripts/apply.sh
+    ```
+    *   该脚本调用 `python apply.py`。
+    *   **输入**: 训练好的 SAE 模型路径 (`RouteSAE_openwebtext2.pt`).
+    *   **过程**: 
+        *   自动加载 LLM (Llama-3.2)。
+        *   遍历 OpenWebText 数据。
+        *   筛选激活值 > 10.0 的特征。
+        *   提取前后文窗口，高亮激活 Token。
+    *   **输出**: 生成 JSON 文件 (e.g., `contexts/RouteSAE_openwebtext2_contexts.json`)，包含每个特征的 Top 激活样本。
+
+---
+
+## 解释流程 (Interpretation)
+
+利用 GPT-4 对提取出的特征进行语义解释。
+
+1.  **运行解释**:
+    ```bash
+    bash scripts/interpret.sh
+    ```
+    *   该脚本调用 `python interpret.py`。
+    *   **前置**: 必须先运行 `apply.sh` 生成 Contexts JSON。
+    *   **配置**: 需要在 `env_setup.sh` 中设置 `OPENAI_API_KEY`。
+    *   **过程**:
+        *   读取 Contexts JSON。
+        *   随机采样 (默认 100 个) 特征。
+        *   组装 Prompt 发送给 OpenAI API。
+        *   自动处理 Rate Limit (429) 错误。
+    *   **输出**: 生成解释报告 (e.g., `interpret/interp_RouteSAE_openwebtext2.json`)，包含每个特征的类别 (Low/High-level)、单义性评分 (1-5) 和文本解释。

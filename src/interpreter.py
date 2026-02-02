@@ -7,7 +7,8 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import tiktoken
-from openai import AzureOpenAI
+import time
+from openai import AzureOpenAI, OpenAI
 
 from .utils import save_json
 
@@ -60,7 +61,7 @@ class Interpreter:
         )
         return prompt
 
-    def chat_completion(self, client: AzureOpenAI, prompt: str, max_retry: int = 3) -> str:
+    def chat_completion(self, client: Any, prompt: str, max_retry: int = 3) -> str:
         """Call GPT-4o API with retry logic."""
         if client is None:
             raise ValueError('OpenAI client is not initialized')
@@ -124,11 +125,22 @@ class Interpreter:
         logger.info(f"Sampled {sample_size} features for interpretation")
         logger.info(f"Initializing OpenAI client (engine: {self.cfg.engine})")
         
-        client = AzureOpenAI(
-            azure_endpoint=self.cfg.api_base,
-            api_version=self.cfg.api_version,
-            api_key=self.cfg.api_key,
-        )
+        api_key = self.cfg.api_key or os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+             raise ValueError("API key not found. Please set OPENAI_API_KEY env var or pass --api_key argument.")
+
+        if self.cfg.api_base:
+            logger.info(f"Using AzureOpenAI client (endpoint: {self.cfg.api_base})")
+            client = AzureOpenAI(
+                azure_endpoint=self.cfg.api_base,
+                api_version=self.cfg.api_version,
+                api_key=api_key,
+            )
+        else:
+            logger.info("Using standard OpenAI client")
+            client = OpenAI(
+                api_key=api_key,
+            )
 
         cost = 0.0
         results = {}
@@ -156,6 +168,7 @@ class Interpreter:
             
             token_contexts = latent_context_map[latent]
             tokens_info = []
+
             for token_class, contexts in token_contexts.items():
                 for context in contexts:
                     token = token_class
@@ -166,9 +179,17 @@ class Interpreter:
                         'context': context['context'],
                         'activation': context['activation'],
                     })
+            
+            # 限制 Prompt 大小: 随机采样最多 20 个上下文示例
+            if len(tokens_info) > 20:
+                random.shuffle(tokens_info)
+                tokens_info = tokens_info[:20]
 
             prompt = self.construct_prompt(tokens_info)
             try:
+                # 简单的速率限制处理 (避免 TPM 溢出)
+                time.sleep(2) 
+                
                 response = self.chat_completion(client, prompt)
                 cost += self.calculate_cost(prompt, response)
 

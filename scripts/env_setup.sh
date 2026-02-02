@@ -17,7 +17,7 @@ export TRANSFORMERS_CACHE=/mnt/nfs/zijie/huggingface_cache/hub
 export HF_DATASETS_CACHE=/mnt/nfs/zijie/huggingface_cache/datasets
 
 # CUDA 设置
-export CUDA_VISIBLE_DEVICES=4  # 使用 GPU 4
+export CUDA_VISIBLE_DEVICES=1  # 使用 GPU 1
 
 # 项目路径
 export PROJECT_ROOT=/raid/home/zijie/projects/Fuze_MI_repro/RouteSAE-repro
