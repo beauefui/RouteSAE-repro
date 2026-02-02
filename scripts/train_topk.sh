@@ -17,7 +17,7 @@ export TRANSFORMERS_CACHE=/mnt/nfs/zijie/huggingface_cache/hub
 export HF_DATASETS_CACHE=/mnt/nfs/zijie/huggingface_cache/datasets
 
 # 只使用 GPU 4 (不影响其他用户)
-export CUDA_VISIBLE_DEVICES=5
+export CUDA_VISIBLE_DEVICES=2
 
 # 禁用 wandb 的网络请求
 export WANDB_MODE=offline
@@ -28,7 +28,7 @@ export WANDB_MODE=offline
 PROJECT_ROOT=/raid/home/zijie/projects/Fuze_MI_repro/RouteSAE-repro
 MODEL_PATH=/mnt/nfs/zijie/huggingface_cache/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/$(ls /mnt/nfs/zijie/huggingface_cache/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/ | head -1)
 DATA_PATH=/mnt/nfs/zijie/datasets/openwebtext2
-OUTPUT_DIR=/mnt/nfs/zijie/routesae_repro_outputs
+OUTPUT_DIR=/mnt/nfs/zijie/routesae_repro_outputs/SAE_models
 
 # ============================================================
 # 激活环境

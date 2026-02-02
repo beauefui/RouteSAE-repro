@@ -11,7 +11,7 @@ set -e
 export HF_HOME=/mnt/nfs/zijie/huggingface_cache
 export TRANSFORMERS_CACHE=/mnt/nfs/zijie/huggingface_cache/hub
 export HF_DATASETS_CACHE=/mnt/nfs/zijie/huggingface_cache/datasets
-export CUDA_VISIBLE_DEVICES=4
+export CUDA_VISIBLE_DEVICES=2
 export WANDB_MODE=offline
 
 # ============================================================
@@ -20,11 +20,11 @@ export WANDB_MODE=offline
 PROJECT_ROOT=/raid/home/zijie/projects/Fuze_MI_repro/RouteSAE-repro
 MODEL_PATH=/mnt/nfs/zijie/huggingface_cache/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/$(ls /mnt/nfs/zijie/huggingface_cache/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/ | head -1)
 DATA_PATH=/mnt/nfs/zijie/datasets/openwebtext2
-OUTPUT_DIR=/mnt/nfs/zijie/routesae_repro_outputs
+OUTPUT_DIR=/mnt/nfs/zijie/routesae_repro_outputs/SAE_models
 
 # 模型路径
-TOPK_MODEL="${OUTPUT_DIR}/L16_K64_9213176726f574b556790deb65791e0c5aa438b6_openwebtext2_16384.pt"
-ROUTESAE_MODEL="${OUTPUT_DIR}/sum_hard_K64_9213176726f574b556790deb65791e0c5aa438b6_openwebtext2_16384.pt"
+TOPK_MODEL="${OUTPUT_DIR}/TopK_openwebtext2.pt"
+ROUTESAE_MODEL="${OUTPUT_DIR}/RouteSAE_openwebtext2.pt"
 
 # 评估结果文件
 RESULTS_FILE="${PROJECT_ROOT}/docs/evaluation_results.md"

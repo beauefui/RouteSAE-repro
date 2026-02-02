@@ -132,7 +132,12 @@ class Trainer:
 
         unit_norm_decoder(self.model)
         os.makedirs(self.cfg.output_dir, exist_ok=True)
-        save_path = os.path.join(self.cfg.output_dir, f'{self.title}.pt')
+        
+        # Modified model naming as requested: SAEType_Dataset.pt
+        data_name = self.cfg.data_path.split("/")[-1]
+        save_name = f"{self.cfg.model}_{data_name}.pt"
+        save_path = os.path.join(self.cfg.output_dir, save_name)
+        
         torch.save(self.model.state_dict(), save_path)
         logger.info(f'Training complete. Model saved to {save_path}')
         
