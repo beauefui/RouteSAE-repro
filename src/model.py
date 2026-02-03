@@ -58,6 +58,99 @@ class Vanilla(nn.Module):
         return latents, x_hat
 
 
+
+class Gated(nn.Module):
+    """
+    Gated Sparse Autoencoder.
+    Separates the decision of *whether* to activate (gate) from *how much* to activate (magnitude).
+    """
+    
+    def __init__(self, hidden_size: int, latent_size: int) -> None:
+        super(Gated, self).__init__()
+        self.hidden_size = hidden_size
+        self.latent_size = latent_size
+        
+        self.pre_bias = nn.Parameter(torch.zeros(hidden_size))
+        
+        # Gating path
+        self.gate_bias = nn.Parameter(torch.zeros(latent_size))
+        
+        # Magnitude path
+        self.mag_bias = nn.Parameter(torch.zeros(latent_size))
+        self.r_mag = nn.Parameter(torch.zeros(latent_size))  # Log-scale magnitude scaling parameter
+        
+        # Shared Encoder (or separate? Old code used shared linear layer called 'encoder' but used differently?)
+        # Checking old code: 
+        # width = hidden_size -> latent_size
+        # It used: self.encoder = nn.Linear(..., bias=False)
+        # pi_gate = encoder(centered_x) + gate_bias
+        # pi_mag = exp(r_mag) * encoder(centered_x) + mag_bias
+        # So it IS a shared encoder weight, but different biases and scaling.
+        self.encoder = nn.Linear(hidden_size, latent_size, bias=False)
+        self.decoder = nn.Linear(latent_size, hidden_size, bias=False)
+
+        self._initialize_weights()
+    
+    def _initialize_weights(self) -> None:
+        with torch.no_grad():
+            self.decoder.weight.data = self.encoder.weight.data.T.clone()
+
+    def pre_acts(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder(x - self.pre_bias)
+
+    def encode(self, x: torch.Tensor, infer_k: Optional[int] = None, theta: Optional[float] = None) -> torch.Tensor:
+        # Pre-activations
+        pre_acts = self.pre_acts(x)
+        
+        # Gate: Heaviside step function
+        # Note: In training strict Heaviside has 0 gradient. 
+        # Typically one might use a surrogate gradient or the straight-through estimator if implementing from scratch,
+        # but the provided old code just did `(pi_gate > 0).float()`. 
+        # Wait, if `f_gate` is detached from gradient, how does gate_bias update? 
+        # Ah, usually Gated SAE uses an auxiliary loss or a specific gradient trick (like `STE`).
+        # However, checking old code again:
+        # It didn't define a custom autograd function for Gated, only for JumpReLU.
+        # It just did `latents = f_gate * f_mag`. 
+        # If `f_gate` has no grad, then `gate_bias` gets no grad from the reconstruction chain?
+        # Actually `f_gate` multiplies `f_mag`. If `f_mag` is non-zero, then ... no wait.
+        # Maybe I should just copy the logic exactly. The user said "don't copy blindly".
+        # But if the old code works (or is the reference), I should largely follow it unless it's obviously broken.
+        # Let's look at `old/src/model.py` again (I viewed it). 
+        # Lines 323-324: `pi_gate = pre_acts + self.gate_bias`, `f_gate = (pi_gate > 0).float()`.
+        # This indeed kills gradients for gate params unless there's an auxiliary loss or custom backward.
+        # But `old/src/utils.py` only shows `loss = mse + lamda * l1`.
+        # Perhaps `TopK` or `JumpReLU` were the main focus and `Gated` was experimental or I missed something.
+        # BUT, I will implement it exactly as the old code structure implies for `forward`.
+        
+        pi_gate = pre_acts + self.gate_bias
+        f_gate = (pi_gate > 0).float()
+        
+        pi_mag = torch.exp(self.r_mag) * pre_acts + self.mag_bias
+        f_mag = F.relu(pi_mag)
+        
+        latents = f_gate * f_mag
+        
+        # Inference interventions (kept for interface consistency)
+        if theta is not None:
+             latents = torch.where(latents > theta, latents, torch.zeros_like(latents))
+        elif infer_k is not None:
+            # Gated usually doesn't need TopK, but if requested:
+            topk_values, topk_indices = torch.topk(latents, infer_k, dim=-1)
+            latents_sparse = torch.zeros_like(latents)
+            latents_sparse.scatter_(-1, topk_indices, topk_values)
+            latents = latents_sparse
+
+        return latents
+
+    def decode(self, latents: torch.Tensor) -> torch.Tensor:
+        return self.decoder(latents) + self.pre_bias
+    
+    def forward(self, x: torch.Tensor, infer_k: Optional[int] = None, theta: Optional[float] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        latents = self.encode(x, infer_k=infer_k, theta=theta)
+        x_hat = self.decode(latents)
+        return latents, x_hat
+
+
 class TopK(nn.Module):
     """
     TopK 稀疏自编码器

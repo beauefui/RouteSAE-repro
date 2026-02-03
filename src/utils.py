@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='RouteSAE-repro')
     
     # 模型参数
-    parser.add_argument('--model', type=str, default='TopK', choices=['TopK', 'RouteSAE', 'MLSAE', 'Random', 'Vanilla'])
+    parser.add_argument('--model', type=str, default='TopK', choices=['TopK', 'RouteSAE', 'MLSAE', 'Random', 'Vanilla', 'Gated'])
     parser.add_argument('--model_path', type=str, default='meta-llama/Llama-3.2-1B-Instruct')
     parser.add_argument('--hidden_size', type=int, default=2048)
     parser.add_argument('--latent_size', type=int, default=16384)
@@ -133,7 +133,7 @@ def get_outputs(
         outputs = language_model(input_ids=input_ids, attention_mask=attention_mask)
     
     # 根据模型类型选择 hidden states
-    if cfg.model in ['TopK', 'Vanilla']:
+    if cfg.model in ['TopK', 'Vanilla', 'Gated']:
         hidden_states = outputs.hidden_states[cfg.layer]
     elif cfg.model in ['RouteSAE', 'MLSAE']:
         start_layer = cfg.n_layers // 4
@@ -176,9 +176,9 @@ def L1_loss(latents: torch.Tensor) -> torch.Tensor:
 @torch.no_grad()
 def unit_norm_decoder(model: nn.Module) -> None:
     """归一化解码器权重到单位范数"""
-    from .model import TopK, RouteSAE, Vanilla
+    from .model import TopK, RouteSAE, Vanilla, Gated
     
-    if isinstance(model, TopK) or isinstance(model, Vanilla):
+    if isinstance(model, (TopK, Vanilla, Gated)):
         model.decoder.weight.data /= model.decoder.weight.data.norm(dim=0, keepdim=True)
     elif isinstance(model, RouteSAE):
         model.sae.decoder.weight.data /= model.sae.decoder.weight.data.norm(dim=0, keepdim=True)

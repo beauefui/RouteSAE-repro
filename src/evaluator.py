@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import wandb
 
 from .data import create_dataloader
-from .model import TopK, RouteSAE, Vanilla
+from .model import TopK, RouteSAE, Vanilla, Gated
 from .utils import (
     get_language_model,
     get_outputs,
@@ -59,6 +59,9 @@ class Evaluator:
         elif cfg.model == 'Vanilla':
             self.model = Vanilla(cfg.hidden_size, cfg.latent_size)
             self.hooked_module = self.language_model.get_submodule(f'model.layers.{cfg.layer-1}')
+        elif cfg.model == 'Gated':
+            self.model = Gated(cfg.hidden_size, cfg.latent_size)
+            self.hooked_module = self.language_model.get_submodule(f'model.layers.{cfg.layer-1}')
         elif cfg.model == 'MLSAE':
             self.model = TopK(cfg.hidden_size, cfg.latent_size, cfg.k)
             # MLSAE evaluates across multiple layers, hook updated dynamically in run()
@@ -77,7 +80,7 @@ class Evaluator:
             self.model = RouteSAE(cfg.hidden_size, cfg.n_layers, cfg.latent_size, cfg.k)
             self.layer_weights = np.zeros(cfg.n_layers // 2 + 1, dtype=float)
         else:
-            raise ValueError(f'Invalid model: {cfg.model}. Expected one of [TopK, RouteSAE, MLSAE, Random, Vanilla]')
+            raise ValueError(f'Invalid model: {cfg.model}. Expected one of [TopK, RouteSAE, MLSAE, Random, Vanilla, Gated]')
         
         # 加载预训练权重
         logger.info(f"Loading SAE weights from {cfg.SAE_path}")
@@ -162,7 +165,7 @@ class Evaluator:
                         x, self.cfg.aggre, self.cfg.routing, self.cfg.infer_k, self.cfg.theta
                     )
                     self.layer_weights += batch_layer_weights.sum(dim=(0, 1)).detach().cpu().numpy()
-                else:  # TopK, Random, Vanilla
+                else:  # TopK, Random, Vanilla, Gated
                     latents, x_hat = self.model(x, self.cfg.infer_k, self.cfg.theta)
                     batch_layer_weights = None
                 
@@ -179,7 +182,7 @@ class Evaluator:
                         handles = hook_RouteSAE(
                             self.cfg, self.model, self.language_model, batch_layer_weights
                         )
-                    else:  # TopK, Random, Vanilla
+                    else:  # TopK, Random, Vanilla, Gated
                         handles = hook_SAE(self.cfg, self.model, self.hooked_module)
                     
                     logits_reconstruct = self.language_model(

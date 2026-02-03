@@ -12,7 +12,7 @@ import wandb
 from torch.optim import Adam
 
 from .data import create_dataloader
-from .model import TopK, RouteSAE, Vanilla
+from .model import TopK, RouteSAE, Vanilla, Gated
 from .utils import (
     get_language_model,
     get_outputs,
@@ -63,6 +63,9 @@ class Trainer:
         elif cfg.model == 'Vanilla':
             self.model = Vanilla(cfg.hidden_size, cfg.latent_size)
             self.title = f'L{cfg.layer}_VL{cfg.l1_coeff}_{self.title}'
+        elif cfg.model == 'Gated':
+            self.model = Gated(cfg.hidden_size, cfg.latent_size)
+            self.title = f'L{cfg.layer}_GL{cfg.l1_coeff}_{self.title}'
         elif cfg.model == 'MLSAE':
             self.model = TopK(cfg.hidden_size, cfg.latent_size, cfg.k)
             self.title = f'ML_K{cfg.k}_{self.title}'
@@ -138,7 +141,7 @@ class Trainer:
                         mse_loss = Normalized_MSE_loss(x, x_hat)
                         loss = mse_loss
 
-                    elif self.cfg.model == 'Vanilla':
+                    elif self.cfg.model in ['Vanilla', 'Gated']:
                         latents, x_hat = self.model(x)
                         mse_loss = Normalized_MSE_loss(x, x_hat)
                         l1_reg = L1_loss(latents)
