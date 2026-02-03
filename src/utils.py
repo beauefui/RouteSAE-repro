@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='RouteSAE-repro')
     
     # 模型参数
-    parser.add_argument('--model', type=str, default='TopK', choices=['TopK', 'RouteSAE'])
+    parser.add_argument('--model', type=str, default='TopK', choices=['TopK', 'RouteSAE', 'MLSAE', 'Random'])
     parser.add_argument('--model_path', type=str, default='meta-llama/Llama-3.2-1B-Instruct')
     parser.add_argument('--hidden_size', type=int, default=2048)
     parser.add_argument('--latent_size', type=int, default=16384)
@@ -134,7 +134,7 @@ def get_outputs(
     # 根据模型类型选择 hidden states
     if cfg.model == 'TopK':
         hidden_states = outputs.hidden_states[cfg.layer]
-    elif cfg.model == 'RouteSAE':
+    elif cfg.model in ['RouteSAE', 'MLSAE']:
         start_layer = cfg.n_layers // 4
         end_layer = cfg.n_layers * 3 // 4 + 1
         hidden_states = torch.stack(

@@ -57,12 +57,15 @@ class Trainer:
         if cfg.model == 'TopK':
             self.model = TopK(cfg.hidden_size, cfg.latent_size, cfg.k)
             self.title = f'L{cfg.layer}_K{cfg.k}_{self.title}'
+        elif cfg.model == 'MLSAE':
+            self.model = TopK(cfg.hidden_size, cfg.latent_size, cfg.k)
+            self.title = f'ML_K{cfg.k}_{self.title}'
         elif cfg.model == 'RouteSAE':
             self.model = RouteSAE(cfg.hidden_size, cfg.n_layers, cfg.latent_size, cfg.k)
             self.title = f'{cfg.aggre}_{cfg.routing}_K{cfg.k}_{self.title}'
             self.layer_weights = np.zeros(cfg.n_layers // 2 + 1, dtype=float)
         else:
-            raise ValueError(f'Invalid model: {cfg.model}. Expected one of [TopK, RouteSAE]')
+            raise ValueError(f'Invalid model: {cfg.model}. Expected one of [TopK, RouteSAE, MLSAE]')
 
         self.model.to(self.device)
         self.model.train()
@@ -92,27 +95,50 @@ class Trainer:
                     self.cfg, batch, self.language_model, self.device
                 )
                 
-                x, _, _ = pre_process(hidden_states)
-                x = x.float()  # 确保 float32，因为 LLM 可能输出 bfloat16
+                # Handling MLSAE (multi-layer training)
+                if self.cfg.model == 'MLSAE':
+                    # hidden_states: [batch, seq, n_layers, hidden]
+                    # We iterate over the n_layers dimension
+                    num_layers = hidden_states.shape[2]
+                    for i in range(num_layers):
+                        layer_hidden = hidden_states[:, :, i, :]
+                        x, _, _ = pre_process(layer_hidden)
+                        x = x.float()
+                        
+                        _, x_hat = self.model(x)
+                        loss = Normalized_MSE_loss(x, x_hat)
+                        
+                        self.optimizer.zero_grad()
+                        loss.backward()
+                        self.optimizer.step()
+                        curr_loss = loss.item()
+                    
+                    # Scheduler step after all layers in batch (or per layer? Check logic. Reference code did step per batch loop)
+                    # Reference code: self.scheduler.step() is outside inner layer loop
+                    self.scheduler.step()
 
-                # Forward pass
-                if self.cfg.model == 'RouteSAE':
-                    batch_layer_weights, x, _, x_hat, _ = self.model(
-                        x, self.cfg.aggre, self.cfg.routing
-                    )
-                    self.layer_weights += batch_layer_weights.sum(dim=(0, 1)).detach().cpu().numpy()
-                else:  # TopK
-                    latents, x_hat = self.model(x)
-                
-                # Compute loss
-                loss = Normalized_MSE_loss(x, x_hat)
-                
-                # Backward pass
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
-                self.scheduler.step()
-                curr_loss = loss.item()
+                else:
+                    x, _, _ = pre_process(hidden_states)
+                    x = x.float()  # 确保 float32，因为 LLM 可能输出 bfloat16
+    
+                    # Forward pass
+                    if self.cfg.model == 'RouteSAE':
+                        batch_layer_weights, x, _, x_hat, _ = self.model(
+                            x, self.cfg.aggre, self.cfg.routing
+                        )
+                        self.layer_weights += batch_layer_weights.sum(dim=(0, 1)).detach().cpu().numpy()
+                    else:  # TopK
+                        latents, x_hat = self.model(x)
+                    
+                    # Compute loss
+                    loss = Normalized_MSE_loss(x, x_hat)
+                    
+                    # Backward pass
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    self.optimizer.step()
+                    self.scheduler.step()
+                    curr_loss = loss.item()
 
                 if batch_idx % self.cfg.steps == 0:
                     unit_norm_decoder(self.model)
