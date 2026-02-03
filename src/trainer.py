@@ -12,16 +12,19 @@ import wandb
 from torch.optim import Adam
 
 from .data import create_dataloader
-from .model import TopK, RouteSAE
+from .model import TopK, RouteSAE, Vanilla
 from .utils import (
     get_language_model,
     get_outputs,
     pre_process,
     Normalized_MSE_loss,
     unit_norm_decoder,
+    unit_norm_decoder,
     log_layers,
     wandb_init,
-    LinearWarmupLR
+    LinearWarmupLR,
+    L1_loss
+
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +60,9 @@ class Trainer:
         if cfg.model == 'TopK':
             self.model = TopK(cfg.hidden_size, cfg.latent_size, cfg.k)
             self.title = f'L{cfg.layer}_K{cfg.k}_{self.title}'
+        elif cfg.model == 'Vanilla':
+            self.model = Vanilla(cfg.hidden_size, cfg.latent_size)
+            self.title = f'L{cfg.layer}_VL{cfg.l1_coeff}_{self.title}'
         elif cfg.model == 'MLSAE':
             self.model = TopK(cfg.hidden_size, cfg.latent_size, cfg.k)
             self.title = f'ML_K{cfg.k}_{self.title}'
@@ -127,11 +133,27 @@ class Trainer:
                             x, self.cfg.aggre, self.cfg.routing
                         )
                         self.layer_weights += batch_layer_weights.sum(dim=(0, 1)).detach().cpu().numpy()
-                    else:  # TopK
+                        # Compute loss (RouteSAE does not use L1 usually, or uses it implicitly?)
+                        # Assuming consistent with TopK for now unless specified otherwise, but RouteSAE is TopK based.
+                        mse_loss = Normalized_MSE_loss(x, x_hat)
+                        loss = mse_loss
+
+                    elif self.cfg.model == 'Vanilla':
                         latents, x_hat = self.model(x)
+                        mse_loss = Normalized_MSE_loss(x, x_hat)
+                        l1_reg = L1_loss(latents)
+                        loss = mse_loss + self.cfg.l1_coeff * l1_reg
                     
-                    # Compute loss
-                    loss = Normalized_MSE_loss(x, x_hat)
+                    else:  # TopK or Random
+                        latents, x_hat = self.model(x)
+                        mse_loss = Normalized_MSE_loss(x, x_hat)
+                        loss = mse_loss
+                    
+                    # Log L1 loss for debugging/monitoring
+                    # if self.cfg.model == 'Vanilla': 
+                    #     curr_l1 = l1_reg.item()
+                    
+                    # Compute gradients (common for all)
                     
                     # Backward pass
                     self.optimizer.zero_grad()

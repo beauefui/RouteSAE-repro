@@ -48,13 +48,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='RouteSAE-repro')
     
     # 模型参数
-    parser.add_argument('--model', type=str, default='TopK', choices=['TopK', 'RouteSAE', 'MLSAE', 'Random'])
+    parser.add_argument('--model', type=str, default='TopK', choices=['TopK', 'RouteSAE', 'MLSAE', 'Random', 'Vanilla'])
     parser.add_argument('--model_path', type=str, default='meta-llama/Llama-3.2-1B-Instruct')
     parser.add_argument('--hidden_size', type=int, default=2048)
     parser.add_argument('--latent_size', type=int, default=16384)
     parser.add_argument('--k', type=int, default=64)
     parser.add_argument('--layer', type=int, default=12)
     parser.add_argument('--n_layers', type=int, default=16)
+    parser.add_argument('--l1_coeff', type=float, default=5e-4, help='L1 regularization coefficient for Vanilla SAE')
     
     # RouteSAE 参数
     parser.add_argument('--aggre', type=str, default='sum', choices=['sum', 'mean'])
@@ -132,7 +133,7 @@ def get_outputs(
         outputs = language_model(input_ids=input_ids, attention_mask=attention_mask)
     
     # 根据模型类型选择 hidden states
-    if cfg.model == 'TopK':
+    if cfg.model in ['TopK', 'Vanilla']:
         hidden_states = outputs.hidden_states[cfg.layer]
     elif cfg.model in ['RouteSAE', 'MLSAE']:
         start_layer = cfg.n_layers // 4
@@ -175,9 +176,9 @@ def L1_loss(latents: torch.Tensor) -> torch.Tensor:
 @torch.no_grad()
 def unit_norm_decoder(model: nn.Module) -> None:
     """归一化解码器权重到单位范数"""
-    from .model import TopK, RouteSAE
+    from .model import TopK, RouteSAE, Vanilla
     
-    if isinstance(model, TopK):
+    if isinstance(model, TopK) or isinstance(model, Vanilla):
         model.decoder.weight.data /= model.decoder.weight.data.norm(dim=0, keepdim=True)
     elif isinstance(model, RouteSAE):
         model.sae.decoder.weight.data /= model.sae.decoder.weight.data.norm(dim=0, keepdim=True)

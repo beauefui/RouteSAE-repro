@@ -6,6 +6,58 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+
+class Vanilla(nn.Module):
+    """
+    Vanilla Sparse Autoencoder with L1 Regularization.
+    It uses ReLU activation and typically relies on L1 penalty during training for sparsity.
+    """
+    
+    def __init__(self, hidden_size: int, latent_size: int) -> None:
+        super(Vanilla, self).__init__()
+        self.hidden_size = hidden_size
+        self.latent_size = latent_size
+        
+        self.pre_bias = nn.Parameter(torch.zeros(hidden_size))
+        self.latent_bias = nn.Parameter(torch.zeros(latent_size))
+        
+        self.encoder = nn.Linear(hidden_size, latent_size, bias=False)
+        self.decoder = nn.Linear(latent_size, hidden_size, bias=False)
+
+        self._initialize_weights()
+    
+    def _initialize_weights(self) -> None:
+        with torch.no_grad():
+            self.decoder.weight.data = self.encoder.weight.data.T.clone()
+    
+    def encode(self, x: torch.Tensor, infer_k: Optional[int] = None, theta: Optional[float] = None) -> torch.Tensor:
+        # Pre-activations
+        pre_acts = self.encoder(x - self.pre_bias) + self.latent_bias
+        
+        # Activation (ReLU)
+        latents = F.relu(pre_acts)
+        
+        # Inference time interventions
+        if theta is not None:
+             latents = torch.where(latents > theta, latents, torch.zeros_like(latents))
+        elif infer_k is not None:
+            # Enforce sparsity post-hoc if requested
+            topk_values, topk_indices = torch.topk(latents, infer_k, dim=-1)
+            latents_sparse = torch.zeros_like(latents)
+            latents_sparse.scatter_(-1, topk_indices, topk_values)
+            latents = latents_sparse
+
+        return latents
+
+    def decode(self, latents: torch.Tensor) -> torch.Tensor:
+        return self.decoder(latents) + self.pre_bias
+    
+    def forward(self, x: torch.Tensor, infer_k: Optional[int] = None, theta: Optional[float] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        latents = self.encode(x, infer_k=infer_k, theta=theta)
+        x_hat = self.decode(latents)
+        return latents, x_hat
+
+
 class TopK(nn.Module):
     """
     TopK 稀疏自编码器
