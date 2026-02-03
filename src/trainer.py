@@ -12,7 +12,7 @@ import wandb
 from torch.optim import Adam
 
 from .data import create_dataloader
-from .model import TopK, RouteSAE, Vanilla, Gated, JumpReLU, Step_func
+from .model import TopK, RouteSAE, Vanilla, Gated, JumpReLU, Step_func, Crosscoder
 from .utils import (
     get_language_model,
     get_outputs,
@@ -69,6 +69,9 @@ class Trainer:
         elif cfg.model == 'JumpReLU':
             self.model = JumpReLU(cfg.hidden_size, cfg.latent_size, cfg.threshold, cfg.bandwidth)
             self.title = f'L{cfg.layer}_JL{cfg.l1_coeff}_{self.title}'
+        elif cfg.model == 'Crosscoder':
+            self.model = Crosscoder(cfg.hidden_size, cfg.n_layers, cfg.latent_size)
+            self.title = f'Cross_L{cfg.n_layers}_CL{cfg.l1_coeff}_{self.title}'
         elif cfg.model == 'MLSAE':
             self.model = TopK(cfg.hidden_size, cfg.latent_size, cfg.k)
             self.title = f'ML_K{cfg.k}_{self.title}'
@@ -177,6 +180,12 @@ class Trainer:
                         ).sum(dim=-1).mean()
                         
                         loss = mse_loss + self.cfg.l1_coeff * l0_loss
+
+                    elif self.cfg.model == 'Crosscoder':
+                        latents, x_hat = self.model(x)
+                        mse_loss = Normalized_MSE_loss(x, x_hat)
+                        l1_reg = L1_loss(latents)
+                        loss = mse_loss + self.cfg.l1_coeff * l1_reg
 
                     else:  # TopK or Random
                         latents, x_hat = self.model(x)

@@ -24,6 +24,7 @@ MLSAE_MODEL="${OUTPUT_DIR}/MLSAE_openwebtext2.pt"
 VANILLA_MODEL="${OUTPUT_DIR}/Vanilla_openwebtext2.pt"
 GATED_MODEL="${OUTPUT_DIR}/Gated_openwebtext2.pt"
 JUMPRELU_MODEL="${OUTPUT_DIR}/JumpReLU_openwebtext2.pt"
+CROSSCODER_MODEL="${OUTPUT_DIR}/Crosscoder_openwebtext2.pt"
 # RandomK 使用 TopK 的权重
 RANDOM_MODEL="${OUTPUT_DIR}/TopK_openwebtext2.pt"
 
@@ -110,7 +111,15 @@ evaluate_model "Gated" "$GATED_MODEL" "GATED" ""
 # 6. JumpReLU
 evaluate_model "JumpReLU" "$JUMPRELU_MODEL" "JUMPRELU" ""
 
-# 7. RandomK (使用 Random 模式，它会自动选择随机层)
+# 7. Crosscoder
+# Note: Crosscoder only supports NormMSE currently (KLDiv requires complex hooking)
+echo ""
+echo ">>> Evaluating CROSSCODER..."
+CROSSCODER_NORMMSE=$(python evaluate.py --model Crosscoder --model_path "$MODEL_PATH" --data_path "$DATA_DIR" --SAE_path "$CROSSCODER_MODEL" --layer 16 --n_layers 16 --hidden_size 2048 --latent_size 16384 --batch_size 64 --max_length 512 --max_samples 10000 --metric NormMSE --device $CUDA_VISIBLE_DEVICES --use_wandb 0 2>&1 | grep "Evaluation complete" | awk '{print $NF}')
+echo "CROSSCODER NormMSE: $CROSSCODER_NORMMSE"
+CROSSCODER_KLDIV="N/A (Not Impl)"
+
+# 8. RandomK (使用 Random 模式，它会自动选择随机层)
 # 注意: Random 模式下评估器会忽略 --layer 参数，改为随机选择
 evaluate_model "Random" "$RANDOM_MODEL" "RANDOM" ""
 
@@ -137,10 +146,10 @@ cat > "$RESULTS_FILE" << EOF
 
 ## 评估结果
 
-| 指标 | TopK | RouteSAE | MLSAE | Vanilla | Gated | JumpReLU | RandomK |
-|------|------|----------|-------|---------|-------|----------|---------|
-| **NormMSE** ↓ | ${TOPK_NORMMSE:-N/A} | ${ROUTESAE_NORMMSE:-N/A} | ${MLSAE_NORMMSE:-N/A} | ${VANILLA_NORMMSE:-N/A} | ${GATED_NORMMSE:-N/A} | ${JUMPRELU_NORMMSE:-N/A} | ${RANDOM_NORMMSE:-N/A} |
-| **KL Divergence** ↓ | ${TOPK_KLDIV:-N/A} | ${ROUTESAE_KLDIV:-N/A} | ${MLSAE_KLDIV:-N/A} | ${VANILLA_KLDIV:-N/A} | ${GATED_KLDIV:-N/A} | ${JUMPRELU_KLDIV:-N/A} | ${RANDOM_KLDIV:-N/A} |
+| 指标 | TopK | RouteSAE | MLSAE | Vanilla | Gated | JumpReLU | Crosscoder | RandomK |
+|------|------|----------|-------|---------|-------|----------|------------|---------|
+| **NormMSE** ↓ | ${TOPK_NORMMSE:-N/A} | ${ROUTESAE_NORMMSE:-N/A} | ${MLSAE_NORMMSE:-N/A} | ${VANILLA_NORMMSE:-N/A} | ${GATED_NORMMSE:-N/A} | ${JUMPRELU_NORMMSE:-N/A} | ${CROSSCODER_NORMMSE:-N/A} | ${RANDOM_NORMMSE:-N/A} |
+| **KL Divergence** ↓ | ${TOPK_KLDIV:-N/A} | ${ROUTESAE_KLDIV:-N/A} | ${MLSAE_KLDIV:-N/A} | ${VANILLA_KLDIV:-N/A} | ${GATED_KLDIV:-N/A} | ${JUMPRELU_KLDIV:-N/A} | ${CROSSCODER_KLDIV:-N/A} | ${RANDOM_KLDIV:-N/A} |
 
 
 > 注: ↓ 表示越低越好
@@ -153,7 +162,8 @@ cat > "$RESULTS_FILE" << EOF
 4.  **Vanilla**: 传统 SAE，使用 ReLU 和 L1 正则化。
 5.  **Gated**: Gated SAE，分离 Gate 和 Magnitude。
 6.  **JumpReLU**: JumpReLU SAE，使用与特征相关的可学习阈值。
-7.  **RandomK**: 使用 TopK 模型，但评估时随机选择层 (Baseline)。
+7.  **Crosscoder**: 跨层稀疏编码器，学习多层共享特征 (NormMSE only)。
+8.  **RandomK**: 使用 TopK 模型，但评估时随机选择层 (Baseline)。
 
 ## 结论
 
@@ -168,6 +178,7 @@ cat > "$RESULTS_FILE" << EOF
 - Vanilla: \`${VANILLA_MODEL}\`
 - Gated: \`${GATED_MODEL}\`
 - JumpReLU: \`${JUMPRELU_MODEL}\`
+- Crosscoder: \`${CROSSCODER_MODEL}\`
 - RandomK: \`${RANDOM_MODEL}\` (Shared weights with TopK)
 EOF
 

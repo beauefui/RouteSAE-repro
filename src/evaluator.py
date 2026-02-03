@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import wandb
 
 from .data import create_dataloader
-from .model import TopK, RouteSAE, Vanilla, Gated, JumpReLU
+from .model import TopK, RouteSAE, Vanilla, Gated, JumpReLU, Crosscoder
 from .utils import (
     get_language_model,
     get_outputs,
@@ -65,6 +65,10 @@ class Evaluator:
         elif cfg.model == 'JumpReLU':
             self.model = JumpReLU(cfg.hidden_size, cfg.latent_size, cfg.threshold, cfg.bandwidth)
             self.hooked_module = self.language_model.get_submodule(f'model.layers.{cfg.layer-1}')
+        elif cfg.model == 'Crosscoder':
+            self.model = Crosscoder(cfg.hidden_size, cfg.n_layers, cfg.latent_size)
+            # Crosscoder intervenes on multiple layers, hook not set here but handled in run
+            self.hooked_module = None 
         elif cfg.model == 'MLSAE':
             self.model = TopK(cfg.hidden_size, cfg.latent_size, cfg.k)
             # MLSAE evaluates across multiple layers, hook updated dynamically in run()
@@ -83,7 +87,7 @@ class Evaluator:
             self.model = RouteSAE(cfg.hidden_size, cfg.n_layers, cfg.latent_size, cfg.k)
             self.layer_weights = np.zeros(cfg.n_layers // 2 + 1, dtype=float)
         else:
-            raise ValueError(f'Invalid model: {cfg.model}. Expected one of [TopK, RouteSAE, MLSAE, Random, Vanilla, Gated, JumpReLU]')
+            raise ValueError(f'Invalid model: {cfg.model}. Expected one of [TopK, RouteSAE, MLSAE, Random, Vanilla, Gated, JumpReLU, Crosscoder]')
         
         # 加载预训练权重
         logger.info(f"Loading SAE weights from {cfg.SAE_path}")
@@ -157,6 +161,22 @@ class Evaluator:
                     batch_loss_sum += loss.item()
 
                 batch_loss = batch_loss_sum / num_layers # Average over layers for batch log
+            
+            elif self.cfg.model == 'Crosscoder':
+                # Crosscoder: multi-layer input/output, single latent space
+                x, _, _ = pre_process(hidden_states) # [batch, seq, n_layers, hidden]
+                x = x.float()
+
+                latents, x_hat = self.model(x, self.cfg.infer_k, self.cfg.theta)
+                
+                if self.cfg.metric == 'NormMSE':
+                    loss = Normalized_MSE_loss(x, x_hat)
+                elif self.cfg.metric == 'KLDiv':
+                    raise NotImplementedError("KLDiv metric not yet implemented for Crosscoder")
+                else:
+                    raise ValueError(f'Invalid metric: {self.cfg.metric}')
+                
+                batch_loss = loss.item()
 
             else:
                 x, _, _ = pre_process(hidden_states)

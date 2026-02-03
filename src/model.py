@@ -542,11 +542,135 @@ class RouteSAE(nn.Module):
         return layer_weights, routed_x, latents, x_hat, router_weights
 
 
-def get_model(model_type: str, hidden_size: int, latent_size: int, k: int, n_layers: int = 16) -> nn.Module:
 
-    if model_type == 'TopK':
-        return TopK(hidden_size, latent_size, k)
-    elif model_type == 'RouteSAE':
-        return RouteSAE(hidden_size, n_layers, latent_size, k)
-    else:
-        raise ValueError(f"Unknown model type: {model_type}, please use 'TopK' or 'RouteSAE'")
+class Crosscoder(nn.Module):
+    """
+    Crosscoder: Multi-layer Sparse Autoencoder with cross-layer processing.
+    """
+    
+    def __init__(
+        self, 
+        hidden_size: int, 
+        n_layers: int, 
+        latent_size: int
+    ) -> None:
+        super(Crosscoder, self).__init__()
+        
+        if hidden_size <= 0 or n_layers <= 0 or latent_size <= 0:
+            raise ValueError("All dimensions must be positive")
+        if n_layers < 4:
+            raise ValueError(f"n_layers ({n_layers}) should be at least 4 for meaningful cross-layer processing")
+            
+        self.hidden_size = hidden_size
+        self.latent_size = latent_size
+        
+        # Focus on middle layers (typically most informative)
+        self.start_layer = n_layers // 4
+        self.end_layer = n_layers * 3 // 4 + 1
+        self.n_processed_layers = self.end_layer - self.start_layer
+        
+        # Shared latent bias (all layers contribute to same latent space)
+        self.latent_bias = nn.Parameter(torch.zeros(latent_size))
+
+        # Per-layer encoders (each layer has its own encoding weights)
+        self.encoder = nn.ModuleList([
+            nn.Linear(hidden_size, latent_size, bias=False) 
+            for _ in range(self.n_processed_layers)
+        ])
+        
+        # Per-layer decoders (each layer has its own decoding weights)
+        self.decoder = nn.ModuleList([
+            nn.Linear(latent_size, hidden_size, bias=False) 
+            for _ in range(self.n_processed_layers)
+        ])
+        
+        # Initialize with tied weights (encoder_i.T = decoder_i for each layer)
+        self._initialize_weights()
+    
+    def _initialize_weights(self) -> None:
+        """Initialize decoder weights as transpose of encoder for each layer."""
+        with torch.no_grad():
+            for i in range(len(self.decoder)):
+                self.decoder[i].weight.data = self.encoder[i].weight.data.T.clone()
+    
+    def pre_acts(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Encode each layer and sum into shared latent space.
+        Args:
+            x: Multi-layer activations (shape: [batch, seq_len, n_processed_layers, hidden_size])
+            Note: Input x should correspond to the specific layers processed by Crosscoder.
+        """
+        batch_size, seq_len, n_layers, _ = x.shape
+        
+        # Initialize tensor for layer-wise pre-activations
+        pre_acts = torch.zeros(
+            batch_size, seq_len, self.n_processed_layers, self.latent_size, 
+            device=x.device, dtype=x.dtype
+        )
+        
+        # Encoding
+        for i in range(self.n_processed_layers):
+            pre_acts[:, :, i, :] = self.encoder[i](x[:, :, i, :])
+        
+        # Sum across layers and add shared bias
+        # This creates a unified latent representation combining all layers
+        summed_pre_acts = pre_acts.sum(dim=2) + self.latent_bias
+        
+        return summed_pre_acts
+    
+    def get_latents(
+        self, 
+        pre_acts: torch.Tensor, 
+        infer_k: Optional[int] = None, 
+        theta: Optional[float] = None
+    ) -> torch.Tensor:
+        if infer_k is not None and theta is not None:
+            raise ValueError('Cannot specify both infer_k and theta simultaneously.')
+        
+        if theta is not None:
+            latents = torch.where(pre_acts > theta, pre_acts, torch.zeros_like(pre_acts))
+        elif infer_k is not None:
+            if infer_k > pre_acts.size(-1):
+                infer_k = pre_acts.size(-1)
+            
+            topk_values, topk_indices = torch.topk(pre_acts, infer_k, dim=-1)
+            latents = torch.zeros_like(pre_acts)
+            latents.scatter_(-1, topk_indices, topk_values)
+        else:
+            # ReLU sparsity (std)
+            latents = F.relu(pre_acts)
+        
+        return latents
+    
+    def encode(
+        self, 
+        x: torch.Tensor, 
+        infer_k: Optional[int] = None, 
+        theta: Optional[float] = None
+    ) -> torch.Tensor:
+        pre_acts = self.pre_acts(x)
+        latents = self.get_latents(pre_acts, infer_k=infer_k, theta=theta)
+        return latents
+    
+    def decode(self, latents: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, _ = latents.shape
+        
+        x_hat = torch.zeros(
+            batch_size, seq_len, self.n_processed_layers, self.hidden_size,
+            device=latents.device, dtype=latents.dtype
+        )
+        
+        for i in range(self.n_processed_layers):
+            x_hat[:, :, i, :] = self.decoder[i](latents)
+        
+        return x_hat
+    
+    def forward(
+        self, 
+        x: torch.Tensor, 
+        infer_k: Optional[int] = None, 
+        theta: Optional[float] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        latents = self.encode(x, infer_k=infer_k, theta=theta)
+        x_hat = self.decode(latents)
+        return latents, x_hat
