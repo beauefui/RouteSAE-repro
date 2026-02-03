@@ -151,6 +151,135 @@ class Gated(nn.Module):
         return latents, x_hat
 
 
+
+class Step_func(autograd.Function):
+    """
+    Custom autograd function for differentiable step (Heaviside) function.
+    """
+    
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, threshold: torch.Tensor, bandwidth: float) -> torch.Tensor:
+        ctx.save_for_backward(x, threshold)
+        ctx.bandwidth = bandwidth
+        return (x > threshold).float()
+    
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Optional[torch.Tensor], ...]:
+        x, threshold = ctx.saved_tensors
+        bandwidth = ctx.bandwidth
+        
+        # No gradient flows through x (straight-through)
+        x_grad = torch.zeros_like(grad_output)
+        
+        # Gradient for threshold: box filter approximation
+        in_bandwidth = (x - threshold).abs() < bandwidth / 2
+        threshold_grad = -(1.0 / bandwidth) * in_bandwidth.float() * grad_output
+        
+        return x_grad, threshold_grad, None
+
+
+class Jump_func(autograd.Function):
+    """
+    Custom autograd function for JumpReLU activation.
+    """
+    
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, threshold: torch.Tensor, bandwidth: float) -> torch.Tensor:
+        ctx.save_for_backward(x, threshold)
+        ctx.bandwidth = bandwidth
+        return x * (x > threshold).float()
+    
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Optional[torch.Tensor], ...]:
+        x, threshold = ctx.saved_tensors
+        bandwidth = ctx.bandwidth
+        
+        # Gradient flows through x where it's active
+        x_grad = (x > threshold).float() * grad_output
+        
+        # Gradient for threshold: smooth approximation
+        in_bandwidth = (x - threshold).abs() < bandwidth / 2
+        threshold_grad = -(threshold / bandwidth) * in_bandwidth.float() * grad_output
+        
+        return x_grad, threshold_grad, None
+
+
+class JumpReLU(nn.Module):
+    """
+    JumpReLU Sparse Autoencoder with learned per-feature thresholds.
+    """
+    
+    def __init__(
+        self, 
+        hidden_size: int, 
+        latent_size: int, 
+        threshold: float = 1e-3, 
+        bandwidth: float = 1e-3
+    ) -> None:
+        super(JumpReLU, self).__init__()
+        self.hidden_size = hidden_size
+        self.latent_size = latent_size
+        self.bandwidth = bandwidth
+        
+        self.pre_bias = nn.Parameter(torch.zeros(hidden_size))
+        self.latent_bias = nn.Parameter(torch.zeros(latent_size))
+        
+        self.encoder = nn.Linear(hidden_size, latent_size, bias=False)
+        self.decoder = nn.Linear(latent_size, hidden_size, bias=False)
+
+        # Per-feature learned thresholds
+        self.threshold = nn.Parameter(torch.full((latent_size,), threshold))
+        
+        self._initialize_weights()
+    
+    def _initialize_weights(self) -> None:
+        with torch.no_grad():
+            self.decoder.weight.data = self.encoder.weight.data.T.clone()
+
+    def pre_acts(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder(x - self.pre_bias) + self.latent_bias
+
+    def encode(self, x: torch.Tensor, infer_k: Optional[int] = None, theta: Optional[float] = None) -> torch.Tensor:
+        pre_acts = self.pre_acts(x)
+        # Apply JumpReLU function
+        # Note: In inference, we can just use the threshold. Gradient not needed.
+        # But to be consistent with training or if we want gradients for some reason (e.g. analysis),
+        # we can use the custom function or just direct operation.
+        # Direct operation is faster for inference.
+        
+        mask = (pre_acts > self.threshold).float()
+        latents = pre_acts * mask
+        
+        # Additional inference options (interface consistency)
+        if theta is not None:
+             latents = torch.where(latents > theta, latents, torch.zeros_like(latents))
+        elif infer_k is not None:
+            topk_values, topk_indices = torch.topk(latents, infer_k, dim=-1)
+            latents_sparse = torch.zeros_like(latents)
+            latents_sparse.scatter_(-1, topk_indices, topk_values)
+            latents = latents_sparse
+            
+        return latents
+
+    def decode(self, latents: torch.Tensor) -> torch.Tensor:
+        return self.decoder(latents) + self.pre_bias
+    
+    def forward(self, x: torch.Tensor, infer_k: Optional[int] = None, theta: Optional[float] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Note: During training, we want to use Jump_func to get gradients for threshold.
+        # During inference (infer_k/theta provided), we might use encode() which uses direct operations.
+        # However, to ensure training uses Jump_func, we should do it explicitly.
+        
+        if self.training and infer_k is None and theta is None:
+            pre_acts = self.pre_acts(x)
+            latents = Jump_func.apply(pre_acts, self.threshold, self.bandwidth)
+            x_hat = self.decode(latents)
+            return latents, x_hat
+        else:
+            latents = self.encode(x, infer_k, theta)
+            x_hat = self.decode(latents)
+            return latents, x_hat
+
+
 class TopK(nn.Module):
     """
     TopK 稀疏自编码器

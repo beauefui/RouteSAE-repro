@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# 训练 TopK SAE 脚本
+# 训练 JumpReLU SAE 脚本
 # ============================================================
 # 注意: 所有环境变量和设置只影响当前脚本，不影响服务器全局设置
 # ============================================================
@@ -16,8 +16,8 @@ export HF_HOME=/mnt/nfs/zijie/huggingface_cache
 export TRANSFORMERS_CACHE=/mnt/nfs/zijie/huggingface_cache/hub
 export HF_DATASETS_CACHE=/mnt/nfs/zijie/huggingface_cache/datasets
 
-# 只使用 GPU 1 (不影响其他用户)
-export CUDA_VISIBLE_DEVICES=1
+# 只使用 GPU 2 (不影响其他用户)
+export CUDA_VISIBLE_DEVICES=2
 
 # 禁用 wandb 的网络请求
 export WANDB_MODE=offline
@@ -38,7 +38,7 @@ source $(conda info --base)/etc/profile.d/conda.sh
 conda activate routesaerepro
 
 echo "=============================================="
-echo "Training TopK SAE"
+echo "Training JumpReLU SAE"
 echo "=============================================="
 echo "Model: $MODEL_PATH"
 echo "Data:  $DATA_PATH"
@@ -48,18 +48,23 @@ echo "=============================================="
 # ============================================================
 # 训练参数
 # ============================================================
-# H200 单卡显存 80GB，可以用较大 batch_size
-# Llama-3.2-1B: hidden_size=2048, n_layers=16
+# JumpReLU SAE:
+#   使用 L0 损失近似 (Step function)。
+#   threshold: 初始阈值 (可学习)。
+#   bandwidth: 梯度平滑带宽。
+#   l1_coeff: 此处用于控制 L0 损失的权重 (Sparsity penalty)。
 # ============================================================
 
 python train.py \
-    --model TopK \
+    --model JumpReLU \
     --model_path "$MODEL_PATH" \
     --data_path "$DATA_PATH" \
     --layer 16 \
-    --k 64 \
     --hidden_size 2048 \
     --latent_size 16384 \
+    --l1_coeff 5e-4 \
+    --threshold 1e-3 \
+    --bandwidth 1e-3 \
     --batch_size 128 \
     --max_length 512 \
     --num_epochs 1 \

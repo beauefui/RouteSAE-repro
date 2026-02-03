@@ -23,6 +23,7 @@ ROUTESAE_MODEL="${OUTPUT_DIR}/RouteSAE_openwebtext2.pt"
 MLSAE_MODEL="${OUTPUT_DIR}/MLSAE_openwebtext2.pt"
 VANILLA_MODEL="${OUTPUT_DIR}/Vanilla_openwebtext2.pt"
 GATED_MODEL="${OUTPUT_DIR}/Gated_openwebtext2.pt"
+JUMPRELU_MODEL="${OUTPUT_DIR}/JumpReLU_openwebtext2.pt"
 # RandomK 使用 TopK 的权重
 RANDOM_MODEL="${OUTPUT_DIR}/TopK_openwebtext2.pt"
 
@@ -106,7 +107,10 @@ evaluate_model "Vanilla" "$VANILLA_MODEL" "VANILLA" ""
 # 5. Gated
 evaluate_model "Gated" "$GATED_MODEL" "GATED" ""
 
-# 6. RandomK (使用 Random 模式，它会自动选择随机层)
+# 6. JumpReLU
+evaluate_model "JumpReLU" "$JUMPRELU_MODEL" "JUMPRELU" ""
+
+# 7. RandomK (使用 Random 模式，它会自动选择随机层)
 # 注意: Random 模式下评估器会忽略 --layer 参数，改为随机选择
 evaluate_model "Random" "$RANDOM_MODEL" "RANDOM" ""
 
@@ -133,10 +137,10 @@ cat > "$RESULTS_FILE" << EOF
 
 ## 评估结果
 
-| 指标 | TopK | RouteSAE | MLSAE | Vanilla | Gated | RandomK |
-|------|------|----------|-------|---------|-------|---------|
-| **NormMSE** ↓ | ${TOPK_NORMMSE:-N/A} | ${ROUTESAE_NORMMSE:-N/A} | ${MLSAE_NORMMSE:-N/A} | ${VANILLA_NORMMSE:-N/A} | ${GATED_NORMMSE:-N/A} | ${RANDOM_NORMMSE:-N/A} |
-| **KL Divergence** ↓ | ${TOPK_KLDIV:-N/A} | ${ROUTESAE_KLDIV:-N/A} | ${MLSAE_KLDIV:-N/A} | ${VANILLA_KLDIV:-N/A} | ${GATED_KLDIV:-N/A} | ${RANDOM_KLDIV:-N/A} |
+| 指标 | TopK | RouteSAE | MLSAE | Vanilla | Gated | JumpReLU | RandomK |
+|------|------|----------|-------|---------|-------|----------|---------|
+| **NormMSE** ↓ | ${TOPK_NORMMSE:-N/A} | ${ROUTESAE_NORMMSE:-N/A} | ${MLSAE_NORMMSE:-N/A} | ${VANILLA_NORMMSE:-N/A} | ${GATED_NORMMSE:-N/A} | ${JUMPRELU_NORMMSE:-N/A} | ${RANDOM_NORMMSE:-N/A} |
+| **KL Divergence** ↓ | ${TOPK_KLDIV:-N/A} | ${ROUTESAE_KLDIV:-N/A} | ${MLSAE_KLDIV:-N/A} | ${VANILLA_KLDIV:-N/A} | ${GATED_KLDIV:-N/A} | ${JUMPRELU_KLDIV:-N/A} | ${RANDOM_KLDIV:-N/A} |
 
 
 > 注: ↓ 表示越低越好
@@ -148,7 +152,8 @@ cat > "$RESULTS_FILE" << EOF
 3.  **MLSAE**: 多层 SAE，在所有层上训练统一的特征空间。
 4.  **Vanilla**: 传统 SAE，使用 ReLU 和 L1 正则化。
 5.  **Gated**: Gated SAE，分离 Gate 和 Magnitude。
-6.  **RandomK**: 使用 TopK 模型，但评估时随机选择层 (Baseline)。
+6.  **JumpReLU**: JumpReLU SAE，使用与特征相关的可学习阈值。
+7.  **RandomK**: 使用 TopK 模型，但评估时随机选择层 (Baseline)。
 
 ## 结论
 
@@ -162,6 +167,7 @@ cat > "$RESULTS_FILE" << EOF
 - MLSAE: \`${MLSAE_MODEL}\`
 - Vanilla: \`${VANILLA_MODEL}\`
 - Gated: \`${GATED_MODEL}\`
+- JumpReLU: \`${JUMPRELU_MODEL}\`
 - RandomK: \`${RANDOM_MODEL}\` (Shared weights with TopK)
 EOF
 

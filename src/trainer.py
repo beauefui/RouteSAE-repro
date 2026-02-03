@@ -12,7 +12,7 @@ import wandb
 from torch.optim import Adam
 
 from .data import create_dataloader
-from .model import TopK, RouteSAE, Vanilla, Gated
+from .model import TopK, RouteSAE, Vanilla, Gated, JumpReLU, Step_func
 from .utils import (
     get_language_model,
     get_outputs,
@@ -66,6 +66,9 @@ class Trainer:
         elif cfg.model == 'Gated':
             self.model = Gated(cfg.hidden_size, cfg.latent_size)
             self.title = f'L{cfg.layer}_GL{cfg.l1_coeff}_{self.title}'
+        elif cfg.model == 'JumpReLU':
+            self.model = JumpReLU(cfg.hidden_size, cfg.latent_size, cfg.threshold, cfg.bandwidth)
+            self.title = f'L{cfg.layer}_JL{cfg.l1_coeff}_{self.title}'
         elif cfg.model == 'MLSAE':
             self.model = TopK(cfg.hidden_size, cfg.latent_size, cfg.k)
             self.title = f'ML_K{cfg.k}_{self.title}'
@@ -147,6 +150,34 @@ class Trainer:
                         l1_reg = L1_loss(latents)
                         loss = mse_loss + self.cfg.l1_coeff * l1_reg
                     
+                    elif self.cfg.model == 'JumpReLU':
+                         # L0 loss approximation using Step_func
+                        latents, x_hat = self.model(x) # In training mode, returns latents (pre_acts passed through Jump_func)
+                        mse_loss = Normalized_MSE_loss(x, x_hat)
+                        
+                        # Apply Step_func to get hard gate for L0 calculation
+                        # Note: latents here are already 'gated' by Jump_func (x * mask).
+                        # But L0 loss needs just the mask. 
+                        # We need access to pre_activations or re-compute mask.
+                        # Wait, JumpReLU.forward returns latents = Jump_func(pre, thresh).
+                        # Ideally we want the mask gradient too?
+                        # old/src/utils.py logic:
+                        # l0_loss = Step_func.apply(latents, threshold, bandwidth)
+                        # But `latents` are arguably > threshold already (except 0s).
+                        # Let's check logic: if x > thresh, latent = x. Step(x) -> 1.
+                        # If x < thresh, latent = 0. Step(0) -> 0?
+                        # Wait, Step_func(latents) might be tricky if latents are 0.
+                        # The old logic used `latents` as input to Step_func. 
+                        # If latents are 0, and threshold is > 0, Step is 0.
+                        # If latents (i.e. x) > threshold, Step is 1.
+                        # So Step_func(latents, threshold, bandwidth) roughly works as L0
+                        # PROVIDED latents retain their magnitude. JumpReLU does retain magnitude.
+                        l0_loss = Step_func.apply(
+                            latents, self.model.threshold, self.model.bandwidth
+                        ).sum(dim=-1).mean()
+                        
+                        loss = mse_loss + self.cfg.l1_coeff * l0_loss
+
                     else:  # TopK or Random
                         latents, x_hat = self.model(x)
                         mse_loss = Normalized_MSE_loss(x, x_hat)
