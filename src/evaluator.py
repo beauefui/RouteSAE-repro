@@ -5,6 +5,7 @@ RouteSAE 评估模块
 import argparse
 import logging
 import os
+import random
 
 import numpy as np
 import torch

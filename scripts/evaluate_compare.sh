@@ -52,7 +52,13 @@ evaluate_model() {
     echo ""
     echo ">>> Evaluating $MODEL_LABEL..."
 
-    local NORMMSE=$(python evaluate.py \
+    local LOG_FILE="${OUTPUT_DIR}/${MODEL_LABEL}_eval.log"
+    
+    # ---------------------------------------------------------
+    # NormMSE Evaluation
+    # ---------------------------------------------------------
+    echo "Running NormMSE evaluation..."
+    if python evaluate.py \
         --model $MODEL_TYPE \
         --model_path "$MODEL_PATH" \
         --data_path "$DATA_DIR" \
@@ -66,13 +72,31 @@ evaluate_model() {
         --max_length 512 \
         --max_samples 10000 \
         --metric NormMSE \
-        --device $CUDA_VISIBLE_DEVICES \
-        --use_wandb 0 $EXTRA_ARGS 2>&1 | grep "Evaluation complete" | awk '{print $NF}')
+        --device cuda:0 \
+        --use_wandb 0 $EXTRA_ARGS > "$LOG_FILE" 2>&1; then
+        
+        local NORMMSE=$(grep "Evaluation complete" "$LOG_FILE" | awk '{print $NF}')
+        if [ -z "$NORMMSE" ]; then
+            echo "Error: NormMSE result not found in log. Check $LOG_FILE"
+            cat "$LOG_FILE" | tail -n 20
+        else
+            echo "$MODEL_LABEL NormMSE: $NORMMSE"
+            eval "${MODEL_LABEL}_NORMMSE='$NORMMSE'"
+        fi
+    else
+        echo "Error executing evaluate.py (NormMSE). Check $LOG_FILE"
+        cat "$LOG_FILE" | tail -n 20
+        exit 1
+    fi
 
-    echo "$MODEL_LABEL NormMSE: $NORMMSE"
-    eval "${MODEL_LABEL}_NORMMSE='$NORMMSE'"
-
-    local KLDIV=$(python evaluate.py \
+    # ---------------------------------------------------------
+    # KLDiv Evaluation
+    # ---------------------------------------------------------
+    # Only run KLDiv if previous step succeeded (implicit)
+    
+    echo "Running KLDiv evaluation..."
+    # Append to log file
+    if python evaluate.py \
         --model $MODEL_TYPE \
         --model_path "$MODEL_PATH" \
         --data_path "$DATA_DIR" \
@@ -86,11 +110,30 @@ evaluate_model() {
         --max_length 512 \
         --max_samples 10000 \
         --metric KLDiv \
-        --device $CUDA_VISIBLE_DEVICES \
-        --use_wandb 0 $EXTRA_ARGS 2>&1 | grep "Evaluation complete" | awk '{print $NF}')
-
-    echo "$MODEL_LABEL KLDiv: $KLDIV"
-    eval "${MODEL_LABEL}_KLDIV='$KLDIV'"
+        --device cuda:0 \
+        --use_wandb 0 $EXTRA_ARGS >> "$LOG_FILE" 2>&1; then
+        
+        local KLDIV=$(grep "Evaluation complete" "$LOG_FILE" | tail -n 1 | awk '{print $NF}')
+        # Note: grep might match multiple lines if we append, so tail -n 1
+        
+        # Check if we got a valid number or if grep matched previous run (NormMSE line?)
+        # evaluate.py prints "Evaluation complete. Metric: Value"
+        # Since metric name is different, grep line might differ.
+        # But script uses "Evaluation complete" generic string.
+        # Ideally evaluate.py should be more specific, but tail -n 1 gets the latest.
+        
+        if [ -z "$KLDIV" ]; then
+            echo "Error: KLDiv result not found in log. Check $LOG_FILE"
+            cat "$LOG_FILE" | tail -n 20
+        else
+            echo "$MODEL_LABEL KLDiv: $KLDIV"
+            eval "${MODEL_LABEL}_KLDIV='$KLDIV'"
+        fi
+    else
+        echo "Error executing evaluate.py (KLDiv). Check $LOG_FILE"
+        cat "$LOG_FILE" | tail -n 20
+        # Don't exit here, allows continuing, but RandomK depends on this.
+    fi
 }
 
 # 1. TopK
@@ -115,7 +158,7 @@ evaluate_model "JumpReLU" "$JUMPRELU_MODEL" "JUMPRELU" ""
 # Note: Crosscoder only supports NormMSE currently (KLDiv requires complex hooking)
 echo ""
 echo ">>> Evaluating CROSSCODER..."
-CROSSCODER_NORMMSE=$(python evaluate.py --model Crosscoder --model_path "$MODEL_PATH" --data_path "$DATA_DIR" --SAE_path "$CROSSCODER_MODEL" --layer 16 --n_layers 16 --hidden_size 2048 --latent_size 16384 --batch_size 64 --max_length 512 --max_samples 10000 --metric NormMSE --device $CUDA_VISIBLE_DEVICES --use_wandb 0 2>&1 | grep "Evaluation complete" | awk '{print $NF}')
+CROSSCODER_NORMMSE=$(python evaluate.py --model Crosscoder --model_path "$MODEL_PATH" --data_path "$DATA_DIR" --SAE_path "$CROSSCODER_MODEL" --layer 16 --n_layers 16 --hidden_size 2048 --latent_size 16384 --batch_size 64 --max_length 512 --max_samples 10000 --metric NormMSE --device cuda:0 --use_wandb 0 2>&1 | grep "Evaluation complete" | awk '{print $NF}')
 echo "CROSSCODER NormMSE: $CROSSCODER_NORMMSE"
 CROSSCODER_KLDIV="N/A (Not Impl)"
 
