@@ -260,140 +260,174 @@ class RouteSAE(nn.Module):
 
 ### 3. [New] 其它 SAE 变体详解
 
-本节展示新增模型的完整实现代码与细节。
+本节展示新增模型的完整实现代码与深度解析，格式上与 TopK/RouteSAE 保持一致。
 
-#### 3.1 Vanilla SAE
+#### 3.1 Vanilla SAE 类详解
 **定位**：传统 SAE，使用 ReLU + L1 正则化。
-**特点**：结构简单，但 L1 正则化会导致"Shrinkage"（收缩）效应，即激活值普遍偏小，重构误差大。
+**特点**：基准模型，但存在 L1 Shrinkage 问题。
 
+##### 3.1.1 初始化 `__init__`
 ```python
 class Vanilla(nn.Module):
     def __init__(self, hidden_size: int, latent_size: int) -> None:
         super(Vanilla, self).__init__()
+        # 偏置项: pre_bias (去中心化), latent_bias (激活阈值)
         self.pre_bias = nn.Parameter(torch.zeros(hidden_size))
         self.latent_bias = nn.Parameter(torch.zeros(latent_size))
         
+        # 编码器与解码器
         self.encoder = nn.Linear(hidden_size, latent_size, bias=False)
         self.decoder = nn.Linear(latent_size, hidden_size, bias=False)
-        self._initialize_weights()
-    
+        self._initialize_weights() # Decoder = Encoder.T
+```
+
+##### 3.1.2 前向传播 `forward`
+```python
     def forward(self, x: torch.Tensor, infer_k=None, theta=None) -> Tuple[torch.Tensor, torch.Tensor]:
-        # 1. 预激活
+        # 1. 预激活: Encoder(x - b_pre) + b_latent
         pre_acts = self.encoder(x - self.pre_bias) + self.latent_bias
         
-        # 2. 激活 (ReLU)
+        # 2. 激活函数: 直接使用 ReLU
+        # 这是与 TopK 的核心区别 (TopK 使用 selection)
         latents = F.relu(pre_acts)
         
-        # 3. 稀疏化干预 (推理时)
+        # 3. 稀疏化干预 (仅推理时生效，用于强制稀疏化)
         if theta is not None:
              latents = torch.where(latents > theta, latents, torch.zeros_like(latents))
         elif infer_k is not None:
+            # 即使训练用 ReLU，推理时也可以强制 TopK
             topk_values, topk_indices = torch.topk(latents, infer_k, dim=-1)
             latents = torch.zeros_like(latents).scatter_(-1, topk_indices, topk_values)
 
-        # 4. 解码
+        # 4. 解码重构
         x_hat = self.decoder(latents) + self.pre_bias
         return latents, x_hat
 ```
 
-#### 3.2 Gated SAE
-**定位**：Gated Linear SAE，分离“是否激活”与“幅值大小”。
-**特点**：使用 Gate 路径判断激活状态，Magnitude 路径计算数值，有效解决了 L1 Shrinkage 问题（因为 Magnitude 路径不需要 L1 正则）。
+---
 
+#### 3.2 Gated SAE 类详解
+**定位**：Gated Linear SAE，分离“是否激活”与“幅值大小”。
+
+##### 3.2.1 初始化 `__init__`
 ```python
 class Gated(nn.Module):
     def __init__(self, hidden_size: int, latent_size: int) -> None:
         super(Gated, self).__init__()
         self.pre_bias = nn.Parameter(torch.zeros(hidden_size))
         
-        # Gate 参数
+        # Gate 路径专用参数
         self.gate_bias = nn.Parameter(torch.zeros(latent_size))
-        # Magnitude 参数
-        self.mag_bias = nn.Parameter(torch.zeros(latent_size))
-        self.r_mag = nn.Parameter(torch.zeros(latent_size))  # Log-scale scaling
         
-        # 共享编码器权重
+        # Magnitude 路径专用参数
+        self.mag_bias = nn.Parameter(torch.zeros(latent_size))
+        self.r_mag = nn.Parameter(torch.zeros(latent_size))  # 幅度缩放系数
+        
+        # 共享权重: Gate 和 Mag 路径共用同一个 Linear 投影
+        # 这种设计比完全分离的两个 Encoder 参数量更小
         self.encoder = nn.Linear(hidden_size, latent_size, bias=False)
         self.decoder = nn.Linear(latent_size, hidden_size, bias=False)
-        self._initialize_weights()
+```
 
+##### 3.2.2 前向传播 `forward`
+```python
     def forward(self, x: torch.Tensor, ...) -> Tuple[torch.Tensor, torch.Tensor]:
-        # 1. 预激活 (不加 Bias)
+        # 1. 基础投影 (不加 bias)
         pre_acts = self.encoder(x - self.pre_bias)
         
-        # 2. Gate 路径 (Heaviside Step)
+        # 2. Gate 路径: 决定是否激活
+        # Heaviside Step Function: (x > 0) ? 1 : 0
         pi_gate = pre_acts + self.gate_bias
-        f_gate = (pi_gate > 0).float() # 训练时通常需要辅助 Loss 或 STE
+        f_gate = (pi_gate > 0).float() 
         
-        # 3. Magnitude 路径
+        # 3. Magnitude 路径: 决定激活值大小
+        # f_mag = ReLU(exp(r_mag) * pre_acts + mag_bias)
+        # 注意: 这里不需要 L1 正则约束，因为稀疏性由 Gate 负责
         pi_mag = torch.exp(self.r_mag) * pre_acts + self.mag_bias
         f_mag = F.relu(pi_mag)
         
-        # 4. 组合
+        # 4. 组合输出
         latents = f_gate * f_mag
         
         x_hat = self.decoder(latents) + self.pre_bias
         return latents, x_hat
 ```
 
-#### 3.3 JumpReLU SAE
-**定位**：使用可学习阈值的阶跃函数代替 ReLU。
-**核心算子**：`Step_func` 和 `Jump_func` (自定义 Autograd 实现直通估计)。
+---
 
+#### 3.3 JumpReLU SAE 类详解
+**定位**：使用可学习阈值的阶跃函数代替 ReLU。
+
+##### 3.3.1 自定义 Autograd `Jump_func`
+这是 JumpReLU 的核心。因为阶跃函数 (Step Function) 不可导，我们必须手动定义反向传播行为。
 ```python
 class Jump_func(autograd.Function):
     @staticmethod
     def forward(ctx, x, threshold, bandwidth):
         ctx.save_for_backward(x, threshold)
         ctx.bandwidth = bandwidth
-        return x * (x > threshold).float() # 大于阈值则保留，否则置零
+        # 前向: 硬截断
+        return x * (x > threshold).float()
     
     @staticmethod
     def backward(ctx, grad_output):
-        # 关键: 阈值的梯度计算使用矩形(box)滤波器近似 delta 函数
-        # 使得 threshold 参数可导且可学习
-        ...
+        x, threshold = ctx.saved_tensors
+        bandwidth = ctx.bandwidth
+        
+        # 1. x 的梯度: 激活区为 1，非激活区为 0 (直通)
+        x_grad = (x > threshold).float() * grad_output
+        
+        # 2. threshold 的梯度: 
+        # 使用矩形核 (Box Kernel) 近似 Dirac Delta 函数
+        # 使得阈值参数可以接收到来自重建误差的梯度信号并进行更新
+        in_bandwidth = (x - threshold).abs() < bandwidth / 2
+        threshold_grad = -(threshold / bandwidth) * in_bandwidth.float() * grad_output
+        
         return x_grad, threshold_grad, None
+```
 
+##### 3.3.2 模块实现 `JumpReLU`
+```python
 class JumpReLU(nn.Module):
     def __init__(self, hidden_size, latent_size, threshold=1e-3, bandwidth=1e-3):
-        super().__init__()
         # ... 初始化 ...
-        # 每个特征有一个独立的可学习阈值
+        # [关键] 每个特征独立的可学习阈值
         self.threshold = nn.Parameter(torch.full((latent_size,), threshold))
         self.bandwidth = bandwidth
 
     def forward(self, x, infer_k=None, theta=None):
+        pre_acts = self.encoder(x - self.pre_bias) + self.latent_bias
+        
         if self.training and infer_k is None:
-            pre_acts = self.encoder(x - self.pre_bias) + self.latent_bias
-            # 调用自定义 Function
+            # 训练阶段: 调用自定义 Function 以获得梯度
             latents = Jump_func.apply(pre_acts, self.threshold, self.bandwidth)
-            x_hat = self.decoder(latents) + self.pre_bias
-            return latents, x_hat
         else:
-            # 推理时直接截断
+            # 推理阶段: 直接硬截断，速度更快
             mask = (pre_acts > self.threshold).float()
             latents = pre_acts * mask
-            ...
+            
+        x_hat = self.decoder(latents) + self.pre_bias
+        return latents, x_hat
 ```
 
-#### 3.4 Crosscoder SAE
-**定位**：跨层稀疏自动编码器。
-**核心创新**：
-1.  **多层输入**：同时接收 Layer N 到 Layer N+M 的激活。
-2.  **共享特征**：所有层的信息汇总到一个共享的 Latent Space。
-3.  **分层解码**：同一个 Latent 向量被解码回不同的层。
+---
 
+#### 3.4 Crosscoder SAE 类详解
+**定位**：跨层稀疏自动编码器，也是本项目最高级的变体之一。
+
+##### 3.4.1 初始化 `__init__`
 ```python
 class Crosscoder(nn.Module):
     def __init__(self, hidden_size, n_layers, latent_size):
         super().__init__()
-        # 关注中间层 (e.g., Layer 4-12)
+        # 定义处理范围: 如 Layer 4-12
         self.start_layer = n_layers // 4
         self.end_layer = n_layers * 3 // 4 + 1
         self.n_processed_layers = self.end_layer - self.start_layer
         
-        # 一组编码器 & 一组解码器 (每层一个)
+        # [关键结构] 多头编码器 & 多头解码器
+        # 我们不是处理单个向量，而是处理 [Layer 4, Layer 5, ..., Layer 12] 这一组向量
+        # 每个 Layer 都有自己独立的 Projection 矩阵
         self.encoder = nn.ModuleList([
             nn.Linear(hidden_size, latent_size, bias=False) 
             for _ in range(self.n_processed_layers)
@@ -403,26 +437,32 @@ class Crosscoder(nn.Module):
             for _ in range(self.n_processed_layers)
         ])
         
-        # 共享的 Latent Bias
+        # 共享 Latent Bias (说明所有层共用一个语义空间)
         self.latent_bias = nn.Parameter(torch.zeros(latent_size))
+```
 
+##### 3.4.2 跨层编码 `pre_acts`
+```python
     def pre_acts(self, x: torch.Tensor) -> torch.Tensor:
         # x shape: [batch, seq, n_processed_layers, hidden]
-        batch_size, seq, n_layers, _ = x.shape
-        pre_acts = torch.zeros(..., self.latent_size, device=x.device)
         
-        # 1. 分层编码
+        # 1. 分层独立投影
+        pre_acts = torch.zeros(..., self.latent_size, ...)
         for i in range(self.n_processed_layers):
             pre_acts[:, :, i, :] = self.encoder[i](x[:, :, i, :])
         
-        # 2. 跨层求和 (Sum across layers)
-        # 所有层的信息融合到同一个隐空间
+        # 2. 跨层求和 (Reduction)
+        # 将来自 Layer 4 的信息 + Layer 5 的信息 + ... 融合
+        # 这一步实现了 "Cross-Layer" 信息交互
         summed_pre_acts = pre_acts.sum(dim=2) + self.latent_bias
         return summed_pre_acts
+```
 
+##### 3.4.3 分层解码 `decode`
+```python
     def decode(self, latents: torch.Tensor) -> torch.Tensor:
-        # 3. 分层解码
-        # 将共享 latent 解码回各个层
+        # 将融合后的 Latent (稀疏语义) 还原回各个层的具体表达
+        # 例如: "Paris" 这个概念在 Layer 4 和 Layer 12 的向量表示可能不同
         x_hat = torch.zeros(..., self.n_processed_layers, self.hidden_size)
         for i in range(self.n_processed_layers):
             x_hat[:, :, i, :] = self.decoder[i](latents)
@@ -658,7 +698,18 @@ def hook_RouteSAE(cfg, model, language_model, batch_layer_weights, ...):
                     x_input = x
                 
                 # 4. 计算损失
-                loss = Normalized_MSE_loss(x_input, x_hat)
+                if self.cfg.model == 'Crosscoder':
+                    # Crosscoder Loss = MSE + Recons + L1 * L1_Coeff
+                    # 注意: Crosscoder 的 latents 是 [batch, seq, latent], L1 Loss 对其求平均
+                    mse_loss = Normalized_MSE_loss(x, x_hat)
+                    l1_loss = latents.abs().mean()
+                    loss = mse_loss + self.cfg.l1_coeff * l1_loss
+                else:
+                    # 标准 SAE (TopK/RouteSAE)
+                    # RouteSAE 可能包含额外的 router loss，但在 run() 中统一封装了
+                    # TopK 只有 MSE (由 L0 约束稀疏性)
+                    # Vanilla/Gated 可能也需要加 L1，视具体实现而定
+                    loss = Normalized_MSE_loss(x_input, x_hat)
                 
                 # 5. 反向传播
                 self.optimizer.zero_grad()
@@ -695,6 +746,8 @@ def hook_RouteSAE(cfg, model, language_model, batch_layer_weights, ...):
     
     # 步骤 3: 注入 Hook
     # Hook 会在 LLM 运行到中间层时，强制把激活值替换为 SAE 的重构值
+    # 注意: RouteSAE Hook 较复杂，涉及多层 gather/scatter
+    # 目前 Crosscoder 暂不支持 KLDiv 评估 (因为涉及跨层同时干预，实现更复杂)
     handles = hook_RouteSAE(..., route_weights)
     
     # 步骤 4: 干预后的 LLM 前向
