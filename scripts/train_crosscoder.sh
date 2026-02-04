@@ -16,8 +16,8 @@ export HF_HOME=/mnt/nfs/zijie/huggingface_cache
 export TRANSFORMERS_CACHE=/mnt/nfs/zijie/huggingface_cache/hub
 export HF_DATASETS_CACHE=/mnt/nfs/zijie/huggingface_cache/datasets
 
-# 只使用 GPU 3 (不影响其他用户)
-export CUDA_VISIBLE_DEVICES=3
+# 只使用 GPU 4 (不影响其他用户)
+export CUDA_VISIBLE_DEVICES=4
 
 # 禁用 wandb 的网络请求
 export WANDB_MODE=offline

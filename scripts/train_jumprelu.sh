@@ -16,8 +16,8 @@ export HF_HOME=/mnt/nfs/zijie/huggingface_cache
 export TRANSFORMERS_CACHE=/mnt/nfs/zijie/huggingface_cache/hub
 export HF_DATASETS_CACHE=/mnt/nfs/zijie/huggingface_cache/datasets
 
-# 只使用 GPU 0 (不影响其他用户)
-export CUDA_VISIBLE_DEVICES=0
+# 只使用 GPU 6 (不影响其他用户)
+export CUDA_VISIBLE_DEVICES=6
 
 # 禁用 wandb 的网络请求
 export WANDB_MODE=offline
@@ -67,7 +67,7 @@ python train.py \
     --bandwidth 1e-3 \
     --batch_size 128 \
     --max_length 512 \
-    --num_epochs 1 \
+    --num_epochs 3 \
     --lr 5e-4 \
     --steps 100 \
     --max_samples 100000 \

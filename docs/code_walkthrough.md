@@ -40,6 +40,10 @@ RouteSAE-repro/
 │   ├── download_data.sh  # 数据下载工具
 │   ├── download_model.sh # 模型下载工具
 │   ├── train_topk.sh     # TopK 训练入口脚本
+│   ├── train_vanilla.sh  # [New] Vanilla SAE 训练入口
+│   ├── train_gated.sh    # [New] Gated SAE 训练入口
+│   ├── train_jumprelu.sh # [New] JumpReLU SAE 训练入口
+│   ├── train_crosscoder.sh # [New] Crosscoder SAE 训练入口
 │   ├── train_routesae.sh # RouteSAE 训练入口脚本
 │   ├── evaluate_compare.sh # 评估对比入口脚本
 │   ├── apply.sh          # 特征提取入口脚本
@@ -251,6 +255,179 @@ class RouteSAE(nn.Module):
             layer_weights = router_weights
             
         return layer_weights, routed_x
+
+---
+
+### 3. [New] 其它 SAE 变体详解
+
+本节展示新增模型的完整实现代码与细节。
+
+#### 3.1 Vanilla SAE
+**定位**：传统 SAE，使用 ReLU + L1 正则化。
+**特点**：结构简单，但 L1 正则化会导致"Shrinkage"（收缩）效应，即激活值普遍偏小，重构误差大。
+
+```python
+class Vanilla(nn.Module):
+    def __init__(self, hidden_size: int, latent_size: int) -> None:
+        super(Vanilla, self).__init__()
+        self.pre_bias = nn.Parameter(torch.zeros(hidden_size))
+        self.latent_bias = nn.Parameter(torch.zeros(latent_size))
+        
+        self.encoder = nn.Linear(hidden_size, latent_size, bias=False)
+        self.decoder = nn.Linear(latent_size, hidden_size, bias=False)
+        self._initialize_weights()
+    
+    def forward(self, x: torch.Tensor, infer_k=None, theta=None) -> Tuple[torch.Tensor, torch.Tensor]:
+        # 1. 预激活
+        pre_acts = self.encoder(x - self.pre_bias) + self.latent_bias
+        
+        # 2. 激活 (ReLU)
+        latents = F.relu(pre_acts)
+        
+        # 3. 稀疏化干预 (推理时)
+        if theta is not None:
+             latents = torch.where(latents > theta, latents, torch.zeros_like(latents))
+        elif infer_k is not None:
+            topk_values, topk_indices = torch.topk(latents, infer_k, dim=-1)
+            latents = torch.zeros_like(latents).scatter_(-1, topk_indices, topk_values)
+
+        # 4. 解码
+        x_hat = self.decoder(latents) + self.pre_bias
+        return latents, x_hat
+```
+
+#### 3.2 Gated SAE
+**定位**：Gated Linear SAE，分离“是否激活”与“幅值大小”。
+**特点**：使用 Gate 路径判断激活状态，Magnitude 路径计算数值，有效解决了 L1 Shrinkage 问题（因为 Magnitude 路径不需要 L1 正则）。
+
+```python
+class Gated(nn.Module):
+    def __init__(self, hidden_size: int, latent_size: int) -> None:
+        super(Gated, self).__init__()
+        self.pre_bias = nn.Parameter(torch.zeros(hidden_size))
+        
+        # Gate 参数
+        self.gate_bias = nn.Parameter(torch.zeros(latent_size))
+        # Magnitude 参数
+        self.mag_bias = nn.Parameter(torch.zeros(latent_size))
+        self.r_mag = nn.Parameter(torch.zeros(latent_size))  # Log-scale scaling
+        
+        # 共享编码器权重
+        self.encoder = nn.Linear(hidden_size, latent_size, bias=False)
+        self.decoder = nn.Linear(latent_size, hidden_size, bias=False)
+        self._initialize_weights()
+
+    def forward(self, x: torch.Tensor, ...) -> Tuple[torch.Tensor, torch.Tensor]:
+        # 1. 预激活 (不加 Bias)
+        pre_acts = self.encoder(x - self.pre_bias)
+        
+        # 2. Gate 路径 (Heaviside Step)
+        pi_gate = pre_acts + self.gate_bias
+        f_gate = (pi_gate > 0).float() # 训练时通常需要辅助 Loss 或 STE
+        
+        # 3. Magnitude 路径
+        pi_mag = torch.exp(self.r_mag) * pre_acts + self.mag_bias
+        f_mag = F.relu(pi_mag)
+        
+        # 4. 组合
+        latents = f_gate * f_mag
+        
+        x_hat = self.decoder(latents) + self.pre_bias
+        return latents, x_hat
+```
+
+#### 3.3 JumpReLU SAE
+**定位**：使用可学习阈值的阶跃函数代替 ReLU。
+**核心算子**：`Step_func` 和 `Jump_func` (自定义 Autograd 实现直通估计)。
+
+```python
+class Jump_func(autograd.Function):
+    @staticmethod
+    def forward(ctx, x, threshold, bandwidth):
+        ctx.save_for_backward(x, threshold)
+        ctx.bandwidth = bandwidth
+        return x * (x > threshold).float() # 大于阈值则保留，否则置零
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        # 关键: 阈值的梯度计算使用矩形(box)滤波器近似 delta 函数
+        # 使得 threshold 参数可导且可学习
+        ...
+        return x_grad, threshold_grad, None
+
+class JumpReLU(nn.Module):
+    def __init__(self, hidden_size, latent_size, threshold=1e-3, bandwidth=1e-3):
+        super().__init__()
+        # ... 初始化 ...
+        # 每个特征有一个独立的可学习阈值
+        self.threshold = nn.Parameter(torch.full((latent_size,), threshold))
+        self.bandwidth = bandwidth
+
+    def forward(self, x, infer_k=None, theta=None):
+        if self.training and infer_k is None:
+            pre_acts = self.encoder(x - self.pre_bias) + self.latent_bias
+            # 调用自定义 Function
+            latents = Jump_func.apply(pre_acts, self.threshold, self.bandwidth)
+            x_hat = self.decoder(latents) + self.pre_bias
+            return latents, x_hat
+        else:
+            # 推理时直接截断
+            mask = (pre_acts > self.threshold).float()
+            latents = pre_acts * mask
+            ...
+```
+
+#### 3.4 Crosscoder SAE
+**定位**：跨层稀疏自动编码器。
+**核心创新**：
+1.  **多层输入**：同时接收 Layer N 到 Layer N+M 的激活。
+2.  **共享特征**：所有层的信息汇总到一个共享的 Latent Space。
+3.  **分层解码**：同一个 Latent 向量被解码回不同的层。
+
+```python
+class Crosscoder(nn.Module):
+    def __init__(self, hidden_size, n_layers, latent_size):
+        super().__init__()
+        # 关注中间层 (e.g., Layer 4-12)
+        self.start_layer = n_layers // 4
+        self.end_layer = n_layers * 3 // 4 + 1
+        self.n_processed_layers = self.end_layer - self.start_layer
+        
+        # 一组编码器 & 一组解码器 (每层一个)
+        self.encoder = nn.ModuleList([
+            nn.Linear(hidden_size, latent_size, bias=False) 
+            for _ in range(self.n_processed_layers)
+        ])
+        self.decoder = nn.ModuleList([
+            nn.Linear(latent_size, hidden_size, bias=False) 
+            for _ in range(self.n_processed_layers)
+        ])
+        
+        # 共享的 Latent Bias
+        self.latent_bias = nn.Parameter(torch.zeros(latent_size))
+
+    def pre_acts(self, x: torch.Tensor) -> torch.Tensor:
+        # x shape: [batch, seq, n_processed_layers, hidden]
+        batch_size, seq, n_layers, _ = x.shape
+        pre_acts = torch.zeros(..., self.latent_size, device=x.device)
+        
+        # 1. 分层编码
+        for i in range(self.n_processed_layers):
+            pre_acts[:, :, i, :] = self.encoder[i](x[:, :, i, :])
+        
+        # 2. 跨层求和 (Sum across layers)
+        # 所有层的信息融合到同一个隐空间
+        summed_pre_acts = pre_acts.sum(dim=2) + self.latent_bias
+        return summed_pre_acts
+
+    def decode(self, latents: torch.Tensor) -> torch.Tensor:
+        # 3. 分层解码
+        # 将共享 latent 解码回各个层
+        x_hat = torch.zeros(..., self.n_processed_layers, self.hidden_size)
+        for i in range(self.n_processed_layers):
+            x_hat[:, :, i, :] = self.decoder[i](latents)
+        return x_hat
+```
 ```
 
 ---
@@ -337,11 +514,11 @@ def get_outputs(cfg, batch, language_model, device):
     with torch.no_grad():
         outputs = language_model(input_ids, attention_mask)
     
-    if cfg.model == 'TopK':
+    if cfg.model in ['TopK', 'Vanilla', 'Gated', 'JumpReLU']:
         # 提取单层
         hidden_states = outputs.hidden_states[cfg.layer]
         
-    elif cfg.model == 'RouteSAE':
+    elif cfg.model in ['RouteSAE', 'MLSAE', 'Crosscoder']:
         # 提取多层范围 (start_layer 到 end_layer)
         # stack 后维度: [layers, batch, seq, hidden]
         hidden_states = torch.stack(outputs.hidden_states[start:end])
@@ -695,90 +872,180 @@ class Interpreter:
 
 ## 训练流程
 
-完整操作步骤梳理：
+本节详细拆解训练一个高质量 SAE 模型的完整步骤及调参指南。
 
+### 1. 环境与数据准备
 1.  **环境配置**:
     ```bash
     source scripts/env_setup.sh
-    # 设置 HF_HOME, WANDB_API_KEY
+    # 关键变量:
+    # HF_HOME: 模型缓存路径
+    # CUDA_VISIBLE_DEVICES: 指定显卡
     ```
-
 2.  **数据下载**:
     ```bash
     bash scripts/download_data.sh
-    # 下载 OpenWebText -> 过滤 -> 保存为 jsonl
     ```
+    *   **产物**: `train.jsonl` (每一行是一个 JSON 对象，包含 `text` 字段)。
+    *   **注意**: 即使是 10万样本，也足够训练一个不错的 SAE 用于实验。
 
-3.  **开始训练**:
-    ```bash
-    bash scripts/train_routesae.sh
-    ```
-    *   该脚本会调用 `python train.py --model RouteSAE ...`
-    *   Trainer 初始化 -> 加载模型 -> 循环 Epochs -> 保存 Checkpoint。
+### 2. 启动训练
 
-4.  **监控**:
-    *   查看 W&B Dashboard，观察 Loss 下降曲线和 L0 稀疏度。
+以 `RouteSAE` 为例 (通用命令):
+```bash
+bash scripts/train_routesae.sh
+```
+
+**关键参数详解 (`train.py` arguments)**:
+*   `--model`: 选择模型架构 (TopK, RouteSAE, Crosscoder, etc.)。
+*   `--l1_coeff`: **[核心超参]** L1 正则化系数 (针对 Vanilla/Crosscoder)。
+    *   **过大 (>1e-3)**: 导致 "Feature Collapse"，所有 Latents 输出为 0，Loss 停留在 1.0 附近。
+    *   **过小 (<1e-5)**: 导致 L0 (非零元数量) 激增，丧失稀疏性，失去可解释性。
+    *   **推荐值**: 2e-4 ~ 5e-4。
+*   `--lr`: 学习率。通常 5e-4 到 1e-3 较为稳定。
+*   `--batch_size`: 显存允许的情况下越大越好 (64/128)。Crosscoder 需调小至 32/64。
+
+### 3. 监控与排错 (Troubleshooting)
+
+*   **现象 A: Loss 不下降 (一直 > 0.9)**
+    *   **原因**: L1 系数太大，或学习率太低，或模型初始化不当 (Dead Neurons)。
+    *   **对策**: 减小 `l1_coeff`，检查 `unit_norm_decoder` 是否生效。
+*   **现象 B: OOM (CUDA Out of Memory)**
+    *   **原因**: Crosscoder/RouteSAE 需同时存储多层激活。
+    *   **对策**: 减小 `batch_size` (128 -> 64 -> 32)。
+*   **现象 C: L0 这里程碑式下降**
+    *   **正常**: 训练初期 L0 很高，随着 L1 惩罚生效，L0 会逐渐收敛到目标值 (如 20-100)。
 
 ---
 
 ## 评估流程
 
-完整操作步骤梳理：
+评估是验证 SAE 是否“既稀疏又保真”的关键环节。
 
-1.  **启动评估**:
-    ```bash
-    bash scripts/evaluate_compare.sh
-    ```
+### 1. 启动评估
+```bash
+bash scripts/evaluate_compare.sh
+```
+该脚本会自动对比 8 种模型，核心是运行两次 `evaluate.py`。
 
-2.  **内部逻辑**:
-    *   **Phase 1: NormMSE**: 
-        *   分别加载 TopK 和 RouteSAE。
-        *   运行 `evaluate.py --metric NormMSE`。
-        *   记录 scores。
-    *   **Phase 2: KLDiv**:
-        *   运行 `evaluate.py --metric KLDiv`。
-        *   利用 Hook 机制进行全链路干预测试。
+### 2. Phase 1: 重构质量评估 (NormMSE)
+*   **命令**: `python evaluate.py --metric NormMSE ...`
+*   **指标定义**: 
+    $$ NormMSE = \frac{||x - \hat{x}||^2}{||x||^2} $$
+*   **解读**:
+    *   **< 0.1**: 极其完美 (可能过拟合或 L0 很高)。
+    *   **0.1 ~ 0.3**: **优秀**。大多数高质量 SAE 处于此范围。
+    *   **0.3 ~ 0.6**: **一般**。能捕捉主要特征，但丢失细节。
+    *   **> 0.8**: **失败**。模型未能有效学习。
 
-3.  **结果解读**:
-    *   NormMSE 越低，说明**重构越准**。
-    *   KLDiv 越低，说明**对下游任务影响越小**。
-    *   **结论**: RouteSAE 通常 KLDiv 远优于 TopK，证明了路由机制的有效性。
+### 3. Phase 2: 下游影响评估 (KL Divergence)
+*   **命令**: `python evaluate.py --metric KLDiv ...`
+*   **流程**:
+    1.  运行 LLM 得到原始 Logits $P$。
+    2.  Hook 中间层，用 SAE 重构值 $\hat{x}$ 替换真实激活 $x$。
+    3.  继续运行 LLM 得到干预后的 Logits $Q$。
+    4.  计算 $D_{KL}(P || Q)$。
+*   **解读**: 越低越好。表示 SAE 的替换没有改变 LLM 原本的预测结果，即 SAE 完美捕捉了对下游任务有用的语义信息。
 
 ---
 
 ## 应用流程 (Feature Extraction)
 
-用于提取训练好的 SAE 特征在特定数据集上的激活情况。
+此步骤将“数学上的稀疏向量”转化为“人类可读的文本案例”。
 
-1.  **运行提取**:
-    ```bash
-    bash scripts/apply.sh
-    ```
-    *   该脚本调用 `python apply.py`。
-    *   **输入**: 训练好的 SAE 模型路径 (`RouteSAE_openwebtext2.pt`).
-    *   **过程**: 
-        *   自动加载 LLM (Llama-3.2)。
-        *   遍历 OpenWebText 数据。
-        *   筛选激活值 > 10.0 的特征。
-        *   提取前后文窗口，高亮激活 Token。
-    *   **输出**: 生成 JSON 文件 (e.g., `contexts/RouteSAE_openwebtext2_contexts.json`)，包含每个特征的 Top 激活样本。
+### 1. 运行提取
+```bash
+bash scripts/apply.sh
+```
+
+### 2. 核心逻辑 (data flow)
+1.  **加载模型**: 读取 `RouteSAE_openwebtext2.pt`。
+2.  **全量扫描**: 遍历 OpenWebText 数据集 (如 10万条)。
+3.  **激活筛选**:
+    *   对于每个 Latent Dimension (0~16383):
+    *   记录激活值 > `threshold` (默认 10.0) 的 Token 位置。
+    *   截取该 Token 前后 64 个 Token 作为 Context。
+4.  **去重与排序**: 保留激活值最高的 Top 20 个 Context。
+
+### 3. 产物说明
+生成 `contexts/RouteSAE_openwebtext2_contexts.json`，结构如下：
+```json
+{
+  "latent_context_map": {
+    "1245": {  // 特征 ID
+      "activations": [25.4, 18.2, ...],
+      "tokens": [
+        ["The", "capital", "of", "France", "is", "Paris", ...], // 上下文 A
+        ["Visited", "Paris", "last", "summer", ...]             // 上下文 B
+      ]
+    }
+  }
+}
+```
 
 ---
 
 ## 解释流程 (Interpretation)
 
-利用 GPT-4 对提取出的特征进行语义解释。
+利用 GPT-4 的强大能力，从 Contexts 中归纳出特征的语义。
 
-1.  **运行解释**:
-    ```bash
-    bash scripts/interpret.sh
-    ```
-    *   该脚本调用 `python interpret.py`。
-    *   **前置**: 必须先运行 `apply.sh` 生成 Contexts JSON。
-    *   **配置**: 需要在 `env_setup.sh` 中设置 `OPENAI_API_KEY`。
-    *   **过程**:
-        *   读取 Contexts JSON。
-        *   随机采样 (默认 100 个) 特征。
-        *   组装 Prompt 发送给 OpenAI API。
-        *   自动处理 Rate Limit (429) 错误。
-    *   **输出**: 生成解释报告 (e.g., `interpret/interp_RouteSAE_openwebtext2.json`)，包含每个特征的类别 (Low/High-level)、单义性评分 (1-5) 和文本解释。
+### 1. 运行解释
+```bash
+bash scripts/interpret.sh
+```
+
+### 2. Prompt 构建逻辑
+系统会向 GPT-4 发送如下 Prompt (简化版):
+> "I will provide a set of text snippets. In each snippet, a specific token is highly activated by a neuron using Max Act. Please identify the common theme or concept that this neuron is detecting.
+> Examples: ...
+> Snippets:
+> 1. The capital of **France** is Paris...
+> 2. Visited **Paris** last summer...
+> Warning: If the snippets are unrelated, say 'Polysemantic'."
+
+### 3. 结果产物
+生成 `interpret/interp_RouteSAE_openwebtext2.json`:
+```json
+{
+  "1245": {
+    "description": "Tokens related to the city of Paris or France geography.",
+    "similarity_score": 5, // 1-5 分，5 表示非常明确
+    "polysemantic": false
+  }
+}
+```
+**结果分析**:
+*   如果 Score 高且 description 清晰，说明 SAE 成功解离出了有意义的概念。
+*   如果 Score 低或 polysemantic，说明该特征是“死神经元”或“多义神经元”。
+
+
+---
+
+## 附录：8大模型原理与对比
+
+本项目实现了当前 SAE 领域主流的 8 种模型/变体，以下是它们的详细对比：
+
+| 模型 | 核心机制 | 稀疏策略 | 适用场景 | 优点 | 缺点 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **TopK** | 标准 SAE | Top-K (强制保留 K 个最大值) | 单层特征分析 | 稀疏度可控 (L0=K)，无 L1 收缩问题 | 训练可能不稳定 (Dead Latents) |
+| **Vanilla** | 传统 SAE | ReLU + L1 Regularization | 基准测试 | 实现简单，理论基础扎实 | 存在 L1 收缩 (Shrinkage)，幅度被低估 |
+| **Gated** | Gated Linear SAE | Separation of Gate & Magnitude | 高精度特征提取 | 解决 L1 收缩问题，同时也学习稀疏性 | 参数量增加 (Gate+Mag)，训练较慢 |
+| **JumpReLU**| JumpReLU SAE | Thresholding (Heaviside Step) | 高效特征提取 | 通过可学习阈值实现直接 L0 优化 | 梯度估计困难 (需要 STE) |
+| **RouteSAE** | **Dynamic Routing** | Top-K + Layer Selection | **跨层/多层分析** | **能识别特征的层级归属**，减少计算量 | 结构复杂，需要训练 Router |
+| **Crosscoder**| **Cross-Layer Encoding**| Shared Latent Space | **跨层特征融合** | **发现跨层共享特征**，参数效率高 | 显存消耗大 (同时处理多层) |
+| **MLSAE** | Multi-Layer SAE | Parallel/Shared Processing | 多层基准 | 简单将多层视为 Batch | 忽略了层间相关性 |
+| **RandomK** | Baseline | Random Top-K | 对照组 | 验证 SAE 是否真正学到了特征 | 性能应为下界 |
+
+### 核心区别总结
+
+1.  **单层 vs 多层**:
+    *   **单层**: TopK, Vanilla, Gated, JumpReLU 通常针对某一特定层训练。
+    *   **多层**: RouteSAE, Crosscoder, MLSAE 同时处理多个层。
+        *   **RouteSAE**: "路由"思想，认为一个特征只属于某一层 (或少数层)。
+        *   **Crosscoder**: "融合"思想，认为一个特征是由多层共同贡献的 (Shared Latent)。
+
+2.  **激活函数进化**:
+    *   **ReLU**: 最基础 (Vanilla)，但为了稀疏性需要 L1 正则，导致激活值偏小。
+    *   **TopK**: 放弃 L1，直接限制数量，解决了幅度问题，但梯度难算。
+    *   **Gated/JumpReLU**: 试图结合两者优点，既有稀疏性 (Gate/Threshold)，又有准确幅度。
+
