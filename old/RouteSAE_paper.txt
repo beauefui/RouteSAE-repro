@@ -1,0 +1,932 @@
+                                                    Route Sparse Autoencoder to Interpret Large Language Models
+                                                                      Wei Shi1 * , Sihang Li1 * , Tao Liang2 , Mingyang Wan2 ,
+                                                                         Guojun Ma2† , Xiang Wang1† , Xiangnan He1 ,
+                                                             1
+                                                                 University of Science and Technology of China, 2 Douyin Co., Ltd.,
+                                                                     swei2001@mail.ustc.edu.cn, taoliangdpg@126.com,
+                                                                          {wanmingyang, maguojun}@bytedance.com,
+                                                                   {sihang0520, xiangwang1223, xiangnanhe}@gmail.com
+
+                                                                    Abstract
+                                                 Mechanistic interpretability of large language
+arXiv:2503.08200v3 [cs.LG] 23 May 2025
+
+
+
+
+                                                 models (LLMs) aims to uncover the internal
+                                                 processes of information propagation and rea-
+                                                 soning. Sparse autoencoders (SAEs) have
+                                                 demonstrated promise in this domain by ex-
+                                                 tracting interpretable and monosemantic fea-
+                                                 tures. However, prior works primarily focus
+                                                 on feature extraction from a single layer, fail-
+                                                 ing to effectively capture activations that span
+                                                 multiple layers. In this paper, we introduce
+                                                 Route Sparse Autoencoder (RouteSAE), a new
+                                                                                                     Figure 1: Layer-wise normalized activation values for
+                                                 framework that integrates a routing mechanism
+                                                                                                     two features extracted by Topk SAE in pythia-160m.
+                                                 with a shared SAE to efficiently extract features
+                                                                                                     The low-level feature (visual media terms) exhibits high
+                                                 from multiple layers. It dynamically assigns
+                                                                                                     activation in early layers that gradually decreases in
+                                                 weights to activations from different layers,
+                                                                                                     deeper layers. In contrast, the high-level feature (tempo-
+                                                 incurring minimal parameter overhead while
+                                                                                                     ral expressions) shows increasing activation with depth,
+                                                 achieving high interpretability and flexibility
+                                                                                                     peaking in the later layers.
+                                                 for targeted feature manipulation. We evaluate
+                                                 RouteSAE through extensive experiments on
+                                                 Llama-3.2-1B-Instruct. Specifically, under the
+                                                 same sparsity constraint of 64, RouteSAE ex-        Therefore, SAE and its variants (Huben et al., 2024;
+                                                 tracts 22.5% more features than baseline SAEs       Rajamanoharan et al., 2024a; Gao et al., 2024; Raja-
+                                                 while achieving a 22.3% higher interpretabil-       manoharan et al., 2024b) have been widely utilized
+                                                 ity score. These results underscore the poten-      in LLM interpretation tasks, such as feature discov-
+                                                 tial of RouteSAE as a scalable and effective        ery (Templeton et al., 2024; Gao et al., 2024) and
+                                                 method for LLM interpretability, with appli-        circuit analysis (Marks et al., 2024).
+                                                 cations in feature discovery and model inter-
+                                                                                                        Typically, SAE is trained in an unsupervised
+                                                 vention. Our codes are available at https:
+                                                 //github.com/swei2001/RouteSAEs.                    manner. It first disentangles the intermediate activa-
+                                                                                                     tions from a single layer in the language model into
+                                         1       Introduction                                        a sparse, high-dimensional feature space, which is
+                                                                                                     subsequently reconstructed by a decoder. This pro-
+                                         Mechanistic interpretability of large language mod-         cess reverses the effects of superposition (Elhage
+                                         els (LLMs) seeks to understand and intervene in             et al., 2022a) by extracting features that are sparse,
+                                         the internal process of information propagation             linear, and decomposable.
+                                         and reasoning, to further improve trust and safety             However, the activation strength of features in
+                                         (Elhage et al., 2022b; Gurnee et al., 2023; Wang            this feature space exhibits distinct distribution pat-
+                                         et al., 2023). Sparse autoencoders (SAEs) identify          terns across layers1 (Yun et al., 2021). As shown in
+                                         causally relevant and interpretable monosemantic            Figure 1, low-level features, which are associated
+                                         features in LLMs, offering a promising solution for         with disambiguating word-level polysemy, tend to
+                                         mechanistic interpretability (Bricken et al., 2023).        exhibit peak activation in the early layers and de-
+                                             * Equal Contribution
+                                             †                                                          1
+                                                 Corresponding                                              Referred to as “Transformer factors” in (Yun et al., 2021).
+                                                                     El+1
+
+
+
+
+                                                                                 Dl+1
+                                                                                                                                              xො route
+                                                              x𝑙+1                      xො 𝑙+1               x𝑙+1
+    Layer l+1                                     Layer l+1                                      Layer l+1          v
+                                                                                                                                 p           Decoder
+
+
+
+                                   Decoder
+
+
+
+
+                                                                                                                        Router
+                     Encoder
+                                                                                                                                                           z
+
+
+
+
+                                                                                 Dl
+                                                                     El
+                                                                                                                                     i*      Encoder
+                 x                           xො                x𝑙                        xො 𝑙     Layer l     x𝑙
+       Layer l                                     Layer l                  z
+                               z                                                                                                          xroute = 𝑝𝑖 ∗ x𝑖 ∗
+
+
+
+
+                                                                                 Dl-1
+                                                                    El-1
+                                                              x𝑙−1                      xො 𝑙−1               x𝑙−1
+
+           Vanilla SAEs                                         Crosscoder                                   RouteSAE (Ours)
+Figure 2: Comparison of vanilla single-layer SAE, Crosscoder, and RouteSAE. Most existing SAEs belong to
+the vanilla SAE category, where features are extracted from the activation of a single layer. Crosscoder relies on
+separate encoders and decoders for each layer. RouteSAE incorporates a lightweight router to dynamically integrate
+multi-layer residual stream activations.
+
+
+cline steadily in deeper layers. High-level features,                              To address these challenges, we propose Route
+which capture sentence-level or long-range struc-                               Sparse Autoencoder (RouteSAE). At the core is
+ture, show increasing activation with depth.2                                   integrating a lightweight router with a shared SAE
+   This distribution disparity presents a significant                           to dynamically extract multi-layer features in an ef-
+challenge for previous SAEs (Huben et al., 2024;                                ficient and flexible manner. A router is employed to
+Rajamanoharan et al., 2024a; Gao et al., 2024; Raja-                            compute normalized weights for activations from
+manoharan et al., 2024b), as they typically extract                             multiple layers. This dynamic weighting approach
+features from the hidden state of a single layer,                               significantly reduces the number of parameters
+failing to capture feature activating at other lay-                             compared to a suite of layer-specific encoders and
+ers effectively (cf. Figure 2). Recently proposed                               decoders, thereby addressing scalability concerns.
+Sparse Crosscoders3 (Lindsey et al., 2024) serve as                             Additionally, by unifying feature disentanglement
+an alternative to address this limitation, which sep-                           and reconstruction within a shared SAE, Route-
+arately encodes the hidden states of each layer into                            SAE facilitates fine-grained adjustments of specific
+a high-dimensional feature space and aggregates                                 feature activations, enabling more controlled in-
+the resulting representations for reconstruction (cf.                           terventions to influence the model’s output. This
+Figure 2). This approach facilitates the joint learn-                           enhances flexibility and supports precise feature-
+ing of features across different layers. However,                               level control, making the framework well-suited
+Crosscoder has two critical limitations: (1) Lim-                               for tasks requiring robust and interpretable manip-
+ited scalability: For an L-layer model, Crosscoder                              ulation of model activations.
+employs L separate encoders and decoders to pro-                                   We conduct comprehensive experiments on
+cess activations layer by layer, resulting in a param-                          Llama-3.2-1B-Instruct (Dubey et al., 2024), eval-
+eter scale approximately L times larger than tradi-                             uating downstream KL divergence, interpretable
+tional SAEs. This significantly increases computa-                              feature numbers, and interpretation score. The
+tional overhead during both training and inference.                             experimental results demonstrate that RouteSAE
+(2) Uncontrollable interventions: Crosscoder’s                                  significantly improves the interpretability. At an
+joint learning mechanism projects hidden states                                 equivalent sparsity level of 64, it achieves a 22.5%
+into a high-dimensional space and then aggregates                               increase in the number of interpretable features and
+them, making it impractical to precisely identify                               a 22.3% improvement in interpretation scores.
+and adjust the feature activations at specific lay-                                Our contributions are summarized as follows:
+ers. This limits its flexibility for tasks requiring
+                                                                                • We propose RouteSAE, a novel sparse autoen-
+controlled, feature-level interventions, e.g., feature
+                                                                                  coder framework that integrates multi-layer acti-
+steering (Templeton et al., 2024).
+                                                                                  vations through a routing mechanism.
+   2
+     Refer to (Yun et al., 2021) for more examples of low- and                  • RouteSAE achieves higher computational effi-
+high-level features.
+   3
+     Currently a conceptual framework without complete ex-                        ciency than Crosscoder by using a shared SAE
+perimental validation.                                                            structure with minimal additional parameters.
+• Extensive experiments confirm that RouteSAE                and interpretable monosementic features. In our
+  enhances model interpretability, highlighting the          RouteSAE framework, the shared SAE module is
+  effectiveness of the proposed routing mechanism.           instantiated as a TopK SAE due to its superior per-
+                                                             formance in producing monosemantic features.
+2     Methodology
+                                                             2.2    Route Sparse Autoencoder (RouteSAE)
+In this section, we first briefly review SAEs, then
+                                                             As shown in Figure 2, existing SAEs are typi-
+introduce our proposed Route Sparse Autoencoder
+                                                             cally trained on intermediate activations from a
+(RouteSAE) in detail.
+                                                             single layer, restricting their ability to simultane-
+2.1    Preliminary                                           ously capture both low-level features from shallow
+                                                             layers and high-level features from deep layers. To
+SAE and Feature Decomposition. SAEs decom-
+                                                             overcome this limitation, RouteSAE incorporates a
+pose language model activations — typically resid-
+                                                             lightweight router to dynamically integrate multi-
+ual streams (He et al., 2016), x ∈ Rd , into a sparse
+                                                             layer residual streams from language models and
+linear combination of features f1 , f2 , . . . , fM ∈ Rd ,
+                                                             disentangle them into a unified feature space.
+where M ≫ d represents the feature space dimen-
+                                                                Layer Weights. As illustrated in Figure 3, the
+sion. The original activation x is reconstructed
+                                                             router receives residual streams from multiple lay-
+using an encoder-decoder pair defined as follows:
+                                                             ers and determines which layer’s activation to route.
+              z = σ(Wenc (x − bpre ))                 (1)    Instead of concatenating these activations, which
+                                                             could result in an excessively large input dimen-
+                 x̂ = Wdec z + bpre ,                 (2)    sion, we adopt a simple yet effective aggregation
+                                                             strategy: sum pooling. Specifically, given activa-
+where Wenc ∈ RM ×d and Wdec ∈ Rd×M are the                   tions xi ∈ Rd from layer i, we aggregate them
+encoder and decoder weight matrices, bpre ∈ Rd is            using sum pooling to form the router’s input:
+a bias term, and σ denotes the activation function.
+                                                                                  L−1
+The latent representation z ∈ RM encodes the                                      X
+                                                                            v=          xi ,     xi ∈ Rd ,             (5)
+activation strength of each feature. The training
+                                                                                  i=0
+objective is to minimize the reconstruction mean
+squared error (MSE):                                         where L denotes the total number of layers being
+                                                             routed. The resulting vector v ∈ Rd serves as a
+                   L = ∥x − x̂∥22 .                   (3)    condensed representation of multi-layer activations.
+                                                             Next, the router projects v into RL using a learn-
+   TopK SAE. Early SAEs (Huben et al., 2024;                 able weight matrix Wrouter ∈ RL×d , yielding the
+Bricken et al., 2023) leverage the ReLU activa-              layer weight vector α:
+tion function (Agarap, 2019) to generate sparse
+                                                                             α = Wrouter v ∈ RL .                      (6)
+feature representations, coupled with an additional
+L1 regularization term on latent representation z to         Each element αi in α represents the unnormalized
+enforce sparsity. However, this approach is prone            weight for layer i, indicating its relative importance
+to feature shrinkage, where the L1 constraint drives         in the routing process. These weights are then
+positive activations in z toward zero, reducing the          normalized using a softmax function to obtain layer
+expressive capacity of the sparse feature space. To          selection probabilities pi :
+mitigate this issue, TopK SAE (Gao et al., 2024) re-                 exp(αi )
+places the ReLU activation function with a TopK(·)            pi = PL−1          ,             i = 0, 1, . . . , L − 1. (7)
+function, which directly controls the number of                     j=0 exp(αj )
+
+active latent dimensions by selecting the top K              pi reflects the likelihood that the activation strength
+largest values in z. This is defined as:                     peaks at layer i, dynamically assigned by the router
+                                                             based on the input representations.
+            z = TopK(Wenc (x − bpre )).               (4)       Routing Mechanisms. In RouteSAE, the router
+                                                             selects the layer i∗ with the highest probability pi ,
+By eliminating the need for an L1 regularization             computed as described in Equation 7. Formally,
+term, TopK SAE achieves a more effective balance             this is expressed as:
+between sparsity and reconstruction quality, while
+enhancing the model’s ability to learn disentangled                i∗ = arg max pi ,     i = 0, 1, . . . , L − 1.      (8)
+                                                                              i
+                                                                                                     Do everything [possible/in my power]
+      Output
+                                                                                  • I'll do everything in my power , in collaboration with my fed…
+                                                                                  • You’re doing everything you can to undermine the rule of law…
+      Layer l-1
+                                                                                                             More [X] than [Y]
+                                                                                  • It's a ten-minute scene that they describe as more like an explorable
+      Layer l-2                                                                     painting than an actual game.
+                         v                                                        • They are as much a work of art as they are marvels of engineering.
+                                      p
+
+
+
+
+                                                             Decoder
+                                               Encoder
+         …
+                             Router
+                                      …
+
+
+
+                                          xroute                       xො route                              Units of weight
+      Layer 1
+                                                                                  • The 1,500-pound machine has a wheelbase of 85 inches and an…
+                                                         z                        • Approximately ten kilograms was accidentally dispersed into…
+
+      Layer 0                                                                                                       Olympics
+                                                                                  • Olympians who raised their hand in the black power salute and …
+       Input                                                                      • The Olympics should not be boycotted because that strategy…
+
+Figure 3: RouteSAE employs a lightweight router to dynamically integrate activations from multiple residual stream
+layers, effectively disentangling them into a shared feature space. It enables the model to capture features across
+different layers — low-level features such as “units of weight” and “Olympics” from shallow layers, and high-level
+features like “more [X] than [Y]” and “do everything [possible/in my power]” from deeper layers.
+
+
+To ensure differentiability, we scale the activation                                3     Experiments
+xi∗ from the selected layer i∗ by its corresponding
+probability pi∗ , using it as input to the shared SAE                               We first outline the experimental setup, followed
+for disentangling into the high-dimensional feature                                 by the evaluation of RouteSAE. In this paper, we
+space and subsequent reconstruction training:                                       follow prior work (Gao et al., 2024; Rajamanoha-
+                                                                                    ran et al., 2024a; Huben et al., 2024; Templeton
+                                                                                    et al., 2024; He et al., 2024) and employ multiple
+                      xroute = pi∗ xi∗ .                                  (9)
+                                                                                    evaluation metrics to assess the effectiveness of
+                                                                                    RouteSAE, including downstream KL-divergence,
+The latent representation z and the reconstruction
+                                                                                    interpretable features, interpretation score, and re-
+x̂ are calculated as follows:
+                                                                                    construction loss. Finally, we provide a detailed
+                                                                                    case study, demonstrating that RouteSAE not only
+      zroute = TopK(Wenc (xroute − bpre )) (10)
+                                                                                    effectively captures both low-level features from
+     x̂route = Wdec zroute + bpre .                                     (11)        shallow layers and high-level features from deep
+                                                                                    layers, but also enables targeted manipulation of
+Finally, we minimize the reconstruction MSE:                                        these features to control the model’s output.
+
+                  L = ∥xroute − x̂route ∥22 .                           (12)        3.1     Setup
+                                                                                    Inputs. We train all SAEs on the residual streams
+This objective function jointly trains the router and                               of the Llama-3.2-1B-Instruct. For baseline SAEs,
+the shared TopK SAE, ensuring efficient and adap-                                   we follow the standard approach (Gao et al., 2024)
+tive feature extraction across multiple layers.                                     of selecting the layer located approximately at 34
+   Shared SAE and Unified Feature Space. The                                        of the model depth (i.e., Layer 11). Prior work
+routed intermediate activation ( xroute , as defined                                (Lad et al., 2024) has shown that the early layers of
+in Equation 9) is processed by a shared SAE for re-                                 LLMs primarily handle detokenization, whereas
+construction, which in this work is instantiated as a                               later layers specialize in next-token prediction.
+TopK SAE (Gao et al., 2024). Notably, RouteSAE                                      Based on this insight, we select residual streams
+is flexible and can be easily adapted to various SAE                                from the middle layers of the model as input for
+variants. By employing a shared SAE, RouteSAE                                       both RouteSAE and Crosscoder (Lindsey et al.,
+establishes a unified feature space across activa-                                  2024). In particular, we focus on layers spanning
+                                                                                    1    3
+tions from all routing layers. This ensures consis-                                 4 to 4 of the model depth, as detailed in Table 1.
+tent feature representations, thereby enhancing the                                    The training data is sourced from OpenWeb-
+disentanglement of high-dimensional features and                                    Text2 (Gao et al., 2020), comprising approximately
+improving interpretability.                                                         100 million randomly sampled tokens for training,
+                                                                       (a)                          (b)
+
+
+                                                         Figure 5: Effect of threshold on feature interpretability
+                                                         in RouteSAE. (a) Increasing the threshold reduces the
+Figure 4: Pareto frontier of sparsity versus KL diver-   number of selected features. (b) Higher thresholds yield
+gence. RouteSAE achieves a lower KL divergence at        better interpretation scores across sparsity levels.
+the same sparsity level.
+                                                         streams x with the reconstructed representation x̂
+                                                         during the forward pass of the language model and
+with an additional 10 million tokens reserved for
+                                                         evaluate the reconstruction quality using Kullback-
+evaluation. All experiments are conducted using a
+                                                         Leibler (KL) divergence. It quantifies the discrep-
+context length of 512 tokens. To ensure stable train-
+                                                         ancy between the original and reconstructed dis-
+ing, we normalize the language model activations
+                                                         tributions, with lower value indicating that the ex-
+following (Gao et al., 2024).
+                                                         tracted features are highly relevant for language
+   Hyperparameters. For all SAEs, we use the
+                                                         modeling. Note that RouteSAE replaces the activa-
+Adam optimizer (Kingma and Ba, 2015) with stan-
+                                                         tion at the layer with the highest routing weight.
+dard settings: β1 = 0.9 and β2 = 0.999. The
+                                                            As shown in Figure 4, the sparsity-KL diver-
+learning rate is set to 5 × 10−4 , following a three-
+                                                         gence frontiers for ReLU and Gated SAE are nearly
+phase schedule. (1) Linear warmup. The learning
+                                                         identical, yet both exhibit a significant gap com-
+rate increases linearly from 0 to the target rate over
+                                                         pared to TopK SAE. Due to suboptimal reconstruc-
+the first 5% of training steps. (2) Stable phase.
+                                                         tion quality, the KL divergence for ReLU and Gated
+The learning rate remains constant for 75% of the
+                                                         SAE drops substantially as L0 increases, falling
+training steps. (3) Linear Decay. The learning rate
+                                                         from around 400 to 350. In contrast, the KL diver-
+gradually decreases to zero over the final 20% of
+                                                         gence for both TopK and RouteSAE remains con-
+training steps to ensure smooth convergence. To
+                                                         sistently below 150, with only minimal decreases
+improve training stability, we apply unit norm reg-
+                                                         as L0 increases. This indicates that both methods
+ularization (Gao et al., 2024) to the columns of
+                                                         are able to effectively reconstruct the original in-
+the SAE decoder every 10 steps, ensuring that the
+                                                         put x even at high sparsity levels. The random
+decoder columns maintain unit length.
+                                                         routing baseline yields higher KL divergence than
+   Baselines. We benchmark RouteSAE against
+                                                         both TopK and RouteSAE, further highlighting the
+leading baselines, including ReLU SAE (Huben
+                                                         advantage of learned routing.
+et al., 2024), Gated SAE (Rajamanoharan et al.,
+2024a), TopK SAE, and Crosscoder (Lindsey et al.,           Notably, RouteSAE achieves the best perfor-
+2024). Moreover, we compare with a random set-           mance among all methods, maintaining a lower
+ting, where the router is replaced by a uniform dis-     KL divergence at comparable sparsity levels. It
+tribution that assigns equal routing weights to each     outperforms even TopK SAE, indicating that fea-
+layer. It is important to note that Crosscoder re-       ture substitution during inference is most effective
+mains a conceptual framework and lacks complete          when performed at the layer where the target fea-
+experimental validation. As there is no official         ture is most active, rather than at a predetermined
+codebase or hyperparameter guidance available,           fixed layer. We exclude Crosscoder from this com-
+we implement it following the description in (Lind-      parison, as it produces multiple reconstructed repre-
+sey et al., 2024). We acknowledge that our results       sentations x̂, making its application to this setting
+may not fully reflect its actual performance.            nontrivial and not directly comparable.
+
+3.2   Downstream KL Divergence                           3.3   Interpretable Features
+To assess whether the extracted features are rele-       Previous works (Huben et al., 2024; He et al., 2024)
+vant for language modeling, we replace the residual      interpret features by preserving the context with the
+highest feature activation value. However, we argue
+that it has two limitations: (1) Retaining only the
+highest activation context for each feature leads to
+a large number of undiscernible features; (2) Each
+feature is associated with only a single context,
+reducing the reliability of the interpretation.
+   To address these limitations, we introduce a new
+approach for preserving feature contexts using an
+activation threshold. For a given sequence context,
+only features with activation values exceeding the
+                                                          Figure 6: Comparison of the interpretable feature num-
+threshold are retained. As shown in Figure 5(a),
+                                                          ber. RouteSAE extracts the most interpretable features
+increasing the threshold reduces the number of re-        at the same threshold.
+tained features. In contrast, Figure 5(b) demon-
+strates that a higher threshold leads to improved
+interpretation scores. Consequently, the threshold
+governs a trade-off between the quantity of inter-
+pretable features and their interpretability quality.
+In this section, we set the threshold to 15, which
+achieves a balance between maintaining sufficient
+                                                                        (a)                        (b)
+feature quantity and enhancing interpretability. No-
+                                                          Figure 7: Human–GPT-4o alignment in the automatic
+tably, a single sequence may be associated with
+                                                          feature interpretation pipeline. (a) Percentage of fea-
+multiple contexts.                                        tures assigned to each category (Low, High, or Undis-
+   To further refine the interpretation, activated con-   cernible) by humans and GPT-4o. (b) Distribution of the
+texts are categorized based on their activation to-       absolute differences in interpretability scores between
+kens, maintaining a min-heap of activation values.        human annotators and GPT-4o.
+We retain the top 2 contexts with the highest activa-
+tion values within each activated token. A filtering      ers, we hypothesize that the optimal threshold for
+step is applied to remove features with fewer than        balancing feature quantity and interpretability lies
+four active contexts, ensuring that only sufficiently     in a lower range for Crosscoder. Therefore, com-
+represented features are considered. To evaluate          paring it against the same activation threshold may
+feature extraction, we use 10 million tokens from         not reflect its actual ability to extract high-quality
+the evaluation set to extract contexts associated         features. We plan to investigate this in future work.
+with each feature.
+   As illustrated in Figure 6, at a threshold of 15,
+both ReLU and Gated SAE extract over 1,000 inter-         3.4   Interpretation Score
+pretable features, performing similarly. In contrast,     Despite the feature screening in Section 3.3, the
+TopK SAE significantly outperforms both, extract-         number of retained features remains in the thou-
+ing more than 3,000 features. RouteSAE surpasses          sands, making manual interpretation and evaluation
+all other methods, extracting over 4,000 features at      challenging. To further assess feature interpretabil-
+the same threshold. Notably, RouteSAE exhibits            ity, we follow prior work (Huben et al., 2024; Tem-
+a more gradual decline in the number of extracted         pleton et al., 2024; He et al., 2024) and leverage
+features as L0 increases, while TopK SAE exhibits         GPT-4o (Hurst et al., 2024) to analyze the features
+a more pronounced reduction. The random rout-             extracted by SAEs, assigning an interpretability
+ing baseline sometimes extracts even more features        score alongside feature descriptions. Unlike previ-
+than RouteSAE, but its feature count decreases            ous approaches, we provide GPT-4o with multiple
+much more rapidly as L0 increases. These results          token categories per feature along with their con-
+suggest that learning based solely on single-layer        textual usage. Given resource constraints, we ran-
+activation values limits the ability of SAEs to ex-       domly select a subset of 100 retained features per
+tract interpretable features. In comparison, Cross-       SAE for interpretation. As detailed in Appendix D,
+coder extracts substantially fewer features, retain-      for each feature, we construct a structured prompt
+ing approximately 200. Since Crosscoder aggre-            comprising a prefix prompt, the activated token,
+gates and projects activations across multiple lay-       and its surrounding context, which is then given to
+GPT-4o. GPT-4o outputs three standardized com-
+ponents: (1) Feature categorization, labeling each
+feature as low-level, high-level, or undiscernible;
+(2) Interpretability score, rated on a scale of 1 to 5;
+and (3) Explanation, providing a brief justification
+for the assigned category and score.
+    To evaluate the consistency between GPT-4o and
+human annotators in both feature categorization
+and interpretability scoring, we randomly sample
+100 features from RouteSAE. For each feature,
+                                                          Figure 8: Comparison of interpretation scores. Route-
+we provide its activation contexts and a scoring
+                                                          SAE achieves a higher interpretation score at the same
+prompt to both GPT-4o and human annotators. As            sparsity level.
+illustrated in Figure 7, (a) shows the percentage of
+features assigned to each interpretability category
+(“Low,” “High,” or “Undiscernible”) by both hu-
+mans and GPT-4o. The two distributions are nearly
+identical, reflecting strong categorical agreement
+between human and GPT-4o annotations. (b) de-
+picts the distribution of absolute differences |∆| in
+interpretability scores, showing that most features
+exhibit minimal discrepancy between human and                           (a)                          (b)
+GPT-4o (|∆| < 2). This indicates a high degree of
+alignment in interpretability assessment.                 Figure 9: Illustration of weights assigned to routing
+    To quantify overall interpretability, we compute      layers during training (a) and inference (b). In both
+                                                          cases, the weights exhibit a U-shaped distribution rather
+the average interpretability score across the 100
+                                                          than concentrating on a small subset of shallow layers.
+sampled features for each SAE. Due to stochastic-
+ity in both feature selection and GPT-4o’s scoring,
+these results should be viewed as indicative rather       3.5   Routing Weights
+than definitive measures of interpretability.
+    Figure 8 shows that both ReLU and Gated SAE
+                                                          In fact, reconstructing the activations of a language
+exhibit low and relatively stable interpretation
+                                                          model using SAE becomes increasingly difficult
+scores, consistently falling below those of the other
+                                                          as the number of layers grows. This is likely due
+methods. TopK SAE shows a noticeable decline in
+                                                          to the increasing abstraction and entanglement of
+interpretation scores as L0 increases, with scores
+                                                          features in deeper layers, which imposes additional
+dropping from over 4.0 at sparsity 48 to around
+                                                          challenges on the autoencoder’s capacity to isolate
+3.7 at sparsity 72. In contrast, Crosscoder, despite
+                                                          and reconstruct meaningful components.
+not being sensitive to changes in sparsity, main-
+tains consistent scores, hovering around 3.9 across          To analyze how RouteSAE allocates routing
+all sparsity levels. The random routing baseline          weights across layers during training and inference,
+achieves higher interpretation scores than ReLU,          we track the layer-wise routing weights through-
+Gated, TopK, and Crosscoder, but remains consis-          out both phases. As shown in Figure 9, RouteSAE
+tently lower than RouteSAE. In comparison, Route-         produces a distinct weight profile across layers,
+SAE achieves the highest interpretation scores,           exhibiting a U-shaped distribution rather than con-
+maintaining values above 4.4 at all sparsity levels.      centrating weights on a small subset of shallow
+It remains largely unaffected by changes in sparsity,     layers. This pattern suggests a balanced allocation
+demonstrating its robust ability to preserve high         of representational capacity, where both shallow
+interpretability, regardless of the sparsity setting.     and deep layers contribute meaningfully. These re-
+These results indicate that dynamically leveraging        sults are consistent with the observations reported
+multi-layer activations, as done in RouteSAE and          in (Yun et al., 2021), which indicate that lower-
+even to some extent by the random router, not only        level features are primarily activated in the earlier
+allows for extraction of more features but also leads     layers, whereas higher-level features become more
+to higher feature interpretability.                       prominent in the deeper layers.
+3.6   Case Study                                                                              Olympics
+
+                                                              Human: What does the phrase "a stitch in time saves nine" mean?
+
+Interpretable Features. As shown in Figure 3,                 Original: That's a classic idiom! The phrase "a stitch in time saves
+RouteSAE effectively captures both low-level and              nine" means that taking care of a small problem or task now can
+                                                              prevent a much bigger problem or headache later on.
+high-level features from shallow and deep lay-
+ers, respectively. Specifically, RouteSAE identi-             Clamped: This is the first time I have ever heard of this phrase. I
+                                                              have heard of "a new Olympic Games" but…
+fies low-level features such as “units of weight”
+and “Olympics” from shallow layers. The “units
+                                                                           Do everything [possible/in my power]
+of weight” feature activates on tokens related to
+                                                              Human: Can you tell me about wild dogs? Not stray dogs, but
+weight units, including terms like “pound” and                wild dogs.
+“kilograms”. The “Olympics” feature captures vari-
+                                                              Original: Wild dogs, also known as feral dogs or feral canines, are
+ations of the term “Olympic”, such as “Olympics”              dogs that have been abandoned or lost their homes and are living
+and “Olympian”. These two features exemplify                  in the wild. They are not domesticated dogs…
+
+word-level polysemy disambiguation, peaking at                Clamped: I can do this. You are a wildlife conservationist, and
+shallow layers. At deeper layers, RouteSAE ex-                you've been working with a team to protect and preserve the
+                                                              natural habitats of endangered species…
+tracts high-level features, including the patterns
+“more [X] than [Y]” and “do everything [possible/in       Figure 10: Illustration of feature steering via activation
+my power]”. The first feature identifies tokens that      manipulation in RouteSAE. The original response is
+appear in comparative structures, particularly those      generated with unaltered feature activations, while the
+following the pattern “more [X] than [Y].” The sec-       clamped response is produced after setting the target
+ond feature highlights tokens in phrases expressing       feature’s activation to a high value. The upper example
+a commitment to maximal effort or capability, such        demonstrates a low-level feature associated with the
+as “do my best”, and “do all he could”. These             “Olympics” concept; increasing its activation leads the
+                                                          model to output Olympics-related content. The lower
+two features reflect sentence-level or long-range
+                                                          example involves a high-level feature linked to “doing
+pattern formation, peaking at deeper layers. These        everything possible”; increasing its activation causes the
+observations demonstrate that RouteSAE success-           model to adopt an all-in attitude in its response.
+fully integrates features from multiple layers of
+activations into a unified feature space. For more
+interpretable features, refer to Appendix E.              4     Conclusion
+   RouteSAE Feature Steering Figure 10 illus-
+trates how RouteSAE enables controlled model              In this paper, we introduce Route Sparse Autoen-
+steering by directly manipulating internal features       coder (RouteSAE), a new framework designed to
+from the SAE decoder. This is achieved by replac-         enhance the mechanistic interpretability of LLMs
+ing the activation x with the reconstructed repre-        by efficiently extracting features from multiple lay-
+sentation x̂. In each example, the original response      ers. Through the integration of a dynamic rout-
+is generated without intervention, reflecting the         ing mechanism, RouteSAE enables the assignment
+model’s default behavior. In contrast, the clamped        of layer-specific weights to each routing layer,
+response is obtained by increasing the activation of      achieving a fine-grained, flexible, and scalable ap-
+a specific target feature to 20. In the upper exam-       proach to feature extraction. Extensive experiments
+ple, the clamped feature is a low-level one related       demonstrate that RouteSAE significantly outper-
+to the “Olympics” concept; after intervention, the        forms traditional SAEs, with a 22.5% increase in
+model’s response becomes focused on Olympic-              the number of interpretable features and a 22.3%
+related content, regardless of the input question.        improvement in interpretability scores at the same
+In the lower example, the manipulated feature is          sparsity level. These results underscore the po-
+a high-level one representing the intent to “do ev-       tential of RouteSAE as a powerful tool for under-
+erything possible”; as a result, the model adopts a       standing and intervening in the internal representa-
+proactive, determined stance, as evidenced by re-         tions of LLMs. By enabling more precise control
+sponses such as “I can do this.” This illustrates that,   over feature activations, RouteSAE facilitates bet-
+RouteSAE enables more controllable and targeted           ter model transparency and provides a solid foun-
+interventions on model behavior through direct fea-       dation for future work in feature discovery and
+ture activation manipulation.                             interpretability-driven model interventions.
+Limitations                                                  Archi Mitra, Archie Sravankumar, Artem Korenev,
+                                                             Arthur Hinsvark, Arun Rao, Aston Zhang, and 82
+While RouteSAE shows promising results, several              others. 2024. The llama 3 herd of models. CoRR,
+limitations remain, which we aim to address in               abs/2407.21783.
+future research.                                           Nelson Elhage, Tristan Hume, Catherine Olsson,
+   Improvements of the router. To the best of our            Neel Nanda, Tom Henighan, Scott Johnston, Sheer
+knowledge, we are the first to introduce a routing           ElShowk, Nicholas Joseph, Nova DasSarma, Ben
+mechanism in SAEs to learn a shared feature space.           Mann, Danny Hernandez, Amanda Askell, Ka-
+                                                             mal Ndousse, Andy Jones, Dawn Drain, Anna
+However, we employed a simple linear projection,             Chen, Yuntao Bai, Deep Ganguli, Liane Lovitt,
+which has limited capabilities. Our experiments              and 14 others. 2022a.        Softmax linear units.
+show that the weight distribution of the router is           Transformer Circuits Thread. Https://transformer-
+influenced by the feature space size M and the               circuits.pub/2022/solu/index.html.
+sparsity level k. Therefore, exploring more sophis-        Nelson Elhage, Tristan Hume, Catherine Olsson,
+ticated activation aggregation methods and router            Nicholas Schiefer, Tom Henighan, Shauna
+designs is an important direction for future work.           Kravec, Zac Hatfield-Dodds, Robert Lasenby,
+   Cross-layer features. Research on cross-layer             Dawn Drain, Carol Chen, Roger Grosse, Sam
+                                                             McCandlish, Jared Kaplan, Dario Amodei,
+feature extraction is still in its early stages, and the     Martin Wattenberg, and Christopher Olah.
+current method of dynamically selecting activations          2022b. Toy models of superposition. Trans-
+across multiple layers, as presented in this paper,          former Circuits Thread.        Https://transformer-
+is not yet optimized for discovering cross-layer             circuits.pub/2022/toy_model/index.html.
+features. Further exploration is needed to enable          Nelson Elhage, Neel Nanda, Catherine Olsson, Tom
+RouteSAE to more effectively identify and utilize            Henighan, Nicholas Joseph, Ben Mann, Amanda
+cross-layer features.                                        Askell, Yuntao Bai, Anna Chen, Tom Conerly,
+                                                             Nova DasSarma, Dawn Drain, Deep Ganguli,
+                                                             Zac Hatfield-Dodds, Danny Hernandez, Andy
+Ethical Considerations                                       Jones, Jackson Kernion, Liane Lovitt, Kamal
+This paper presents work whose goal is to advance            Ndousse, and 6 others. 2021.       A mathemati-
+                                                             cal framework for transformer circuits. Trans-
+the field of Machine Learning. There are many                former Circuits Thread.       Https://transformer-
+potential societal consequences of our work, none            circuits.pub/2021/framework/index.html.
+which we feel must be specifically highlighted here.
+                                                           N. Benjamin Erichson, Zhewei Yao, and Michael W. Ma-
+                                                              honey. 2020. Jumprelu: A retrofit defense strategy
+                                                              for adversarial attacks. In ICPRAM, pages 103–114.
+References                                                    SCITEPRESS.
+Abien Fred Agarap. 2019. Deep learning using rectified     Leo Gao, Stella Biderman, Sid Black, Laurence Gold-
+  linear units (relu). Preprint, arXiv:1803.08375.           ing, Travis Hoppe, Charles Foster, Jason Phang,
+Trenton Bricken, Adly Templeton, Joshua Batson,              Horace He, Anish Thite, Noa Nabeshima, Shawn
+  Brian Chen, Adam Jermyn, Tom Conerly, Nick                 Presser, and Connor Leahy. 2020. The Pile: An
+  Turner, Cem Anil, Carson Denison, Amanda Askell,           800gb dataset of diverse text for language modeling.
+  Robert Lasenby, Yifan Wu, Shauna Kravec, Nicholas          arXiv preprint arXiv:2101.00027.
+  Schiefer, Tim Maxwell, Nicholas Joseph, Zac              Leo Gao, Tom Dupré la Tour, Henk Tillman, Gabriel
+  Hatfield-Dodds, Alex Tamkin, Karina Nguyen, and            Goh, Rajan Troll, Alec Radford, Ilya Sutskever, Jan
+  6 others. 2023. Towards monosemanticity: Decom-            Leike, and Jeffrey Wu. 2024. Scaling and evaluating
+  posing language models with dictionary learning.           sparse autoencoders. CoRR, abs/2406.04093.
+  Transformer Circuits Thread. Https://transformer-
+  circuits.pub/2023/monosemantic-                          Wes Gurnee, Neel Nanda, Matthew Pauly, Katherine
+  features/index.html.                                      Harvey, Dmitrii Troitskii, and Dimitris Bertsimas.
+                                                            2023. Finding neurons in a haystack: Case studies
+Ting-Yun Chang, Ta-Chung Chi, Shang-Chi Tsai, and           with sparse probing. Trans. Mach. Learn. Res., 2023.
+  Yun-Nung Chen. 2018. xsense: Learning sense-
+  separated sparse representations and textual defini-     Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian
+  tions for explainable word sense networks. CoRR,           Sun. 2016. Deep residual learning for image recog-
+  abs/1809.03348.                                            nition. In CVPR, pages 770–778. IEEE Computer
+                                                             Society.
+Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey,
+  Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman,          Zhengfu He, Wentao Shu, Xuyang Ge, Lingjie Chen,
+  Akhil Mathur, Alan Schelten, Amy Yang, Angela              Junxuan Wang, Yunhua Zhou, Frances Liu, Qipeng
+  Fan, Anirudh Goyal, Anthony Hartshorn, Aobo Yang,          Guo, Xuanjing Huang, Zuxuan Wu, Yu-Gang Jiang,
+  and Xipeng Qiu. 2024. Llama scope: Extracting           Alec Radford, Jeffrey Wu, Rewon Child, David Luan,
+  millions of features from llama-3.1-8b with sparse        Dario Amodei, Ilya Sutskever, and 1 others. 2019.
+  autoencoders. CoRR, abs/2410.20526.                       Language models are unsupervised multitask learn-
+                                                            ers. OpenAI blog, 1(8):9.
+G E Hinton and R R Salakhutdinov. 2006. Reducing the
+  dimensionality of data with neural networks. Science,   Senthooran Rajamanoharan, Arthur Conmy, Lewis
+  313:504–507.                                              Smith, Tom Lieberum, Vikrant Varma, János Kramár,
+                                                            Rohin Shah, and Neel Nanda. 2024a. Improving
+Robert Huben, Hoagy Cunningham, Logan Riggs,                dictionary learning with gated sparse autoencoders.
+  Aidan Ewart, and Lee Sharkey. 2024. Sparse autoen-        CoRR, abs/2404.16014.
+  coders find highly interpretable features in language
+  models. In ICLR. OpenReview.net.                        Senthooran Rajamanoharan, Tom Lieberum, Nicolas
+                                                            Sonnerat, Arthur Conmy, Vikrant Varma, János
+Aaron Hurst, Adam Lerer, Adam P. Goucher, Adam              Kramár, and Neel Nanda. 2024b. Jumping ahead: Im-
+  Perelman, Aditya Ramesh, Aidan Clark, AJ Ostrow,          proving reconstruction fidelity with jumprelu sparse
+  Akila Welihinda, Alan Hayes, Alec Radford, Alek-          autoencoders. CoRR, abs/2407.14435.
+  sander Madry, Alex Baker-Whitcomb, Alex Beutel,
+  Alex Borzunov, Alex Carney, Alex Chow, Alex Kir-        Morgane Rivière, Shreya Pathak, Pier Giuseppe
+  illov, Alex Nichol, Alex Paino, and 79 others. 2024.     Sessa, Cassidy Hardin, Surya Bhupatiraju, Léonard
+  Gpt-4o system card. CoRR, abs/2410.21276.                Hussenot, Thomas Mesnard, Bobak Shahriari,
+                                                           Alexandre Ramé, Johan Ferret, Peter Liu, Pouya
+Diederik P. Kingma and Jimmy Ba. 2015. Adam: A             Tafti, Abe Friesen, Michelle Casbon, Sabela Ramos,
+  method for stochastic optimization. In ICLR (Poster).    Ravin Kumar, Charline Le Lan, Sammy Jerome, An-
+Connor Kissane, Robert Krzyzanowski, Arthur Conmy,         ton Tsitsulin, and 80 others. 2024. Gemma 2: Im-
+  and Neel Nanda. 2024. Saes (usually) transfer be-        proving open language models at a practical size.
+  tween base and chat models. Alignment Forum.             CoRR, abs/2408.00118.
+
+Vedang Lad, Wes Gurnee, and Max Tegmark. 2024. The        Adly Templeton, Tom Conerly, Jonathan Marcus, Jack
+  remarkable robustness of llms: Stages of inference?       Lindsey, Trenton Bricken, Brian Chen, Adam Pearce,
+  CoRR, abs/2406.19384.                                     Craig Citro, Emmanuel Ameisen, Andy Jones, Hoagy
+                                                            Cunningham, Nicholas L Turner, Callum McDougall,
+Tom Lieberum, Senthooran Rajamanoharan, Arthur              Monte MacDiarmid, C. Daniel Freeman, Theodore R.
+  Conmy, Lewis Smith, Nicolas Sonnerat, Vikrant             Sumers, Edward Rees, Joshua Batson, Adam Jermyn,
+  Varma, János Kramár, Anca D. Dragan, Rohin Shah,          and 3 others. 2024. Scaling monosemanticity: Ex-
+  and Neel Nanda. 2024. Gemma scope: Open sparse            tracting interpretable features from claude 3 sonnet.
+  autoencoders everywhere all at once on gemma 2.           Transformer Circuits Thread.
+  CoRR, abs/2408.05147.
+                                                          Kevin Ro Wang, Alexandre Variengien, Arthur Conmy,
+Jack Lindsey, Adly Templeton, Jonathan Marcus,              Buck Shlegeris, and Jacob Steinhardt. 2023. Inter-
+  Thomas Conerly, Joshua Batson, and Christopher            pretability in the wild: a circuit for indirect object
+   Olah. 2024. Sparse crosscoders for cross-layer           identification in GPT-2 small. In ICLR.
+   features and model diffing. Transformer Circuits
+  Thread.                                                 Zhaowen Wang, Ding Liu, Jianchao Yang, Wei Han,
+                                                            and Thomas S. Huang. 2015. Deeply improved
+Julien Mairal, Francis R. Bach, Jean Ponce, and             sparse coding for image super-resolution. CoRR,
+   Guillermo Sapiro. 2009. Online dictionary learn-         abs/1507.08905.
+   ing for sparse coding. In ICML, volume 382, pages
+   689–696.                                               Zeyu Yun, Yubei Chen, Bruno A. Olshausen, and
+                                                            Yann LeCun. 2021. Transformer visualization via
+Alireza Makhzani and Brendan J. Frey. 2014. k-sparse        dictionary learning: contextualized embedding as
+  autoencoders. In ICLR (Poster).                           a linear superposition of transformer factors. In
+                                                            DeeLIO@NAACL-HLT, pages 1–10. Association for
+Samuel Marks, Can Rager, Eric J. Michaud, Yonatan           Computational Linguistics.
+  Belinkov, David Bau, and Aaron Mueller. 2024.
+  Sparse feature circuits: Discovering and editing in-
+  terpretable causal graphs in language models. CoRR,
+  abs/2403.19647.
+Roland Memisevic, Kishore Reddy Konda, and David
+  Krueger. 2015. Zero-bias autoencoders and the bene-
+  fits of co-adapting features. In ICLR (Poster).
+Anish Mudide, Joshua Engels, Eric J. Michaud, Max
+  Tegmark, and Christian Schröder de Witt. 2024. Effi-
+  cient dictionary learning with switch sparse autoen-
+  coders. CoRR, abs/2410.08201.
+A     Related Work                                     ate activations of language models from a single
+                                                       layer, neglecting features activated across multiple
+In this section, we begin by reviewing prior work      layers, which limits their overall applicability.
+on sparse encoding, followed by a discussion of
+SAEs for interpreting LLMs. Finally, we briefly        A.3    Features across Layers
+introduce cross-layer feature extraction in LLMs.
+                                                       Layer-wise differences in activation features within
+A.1    Sparse Encoding                                 the transformer-based language model were first
+                                                       highlighted in (Yun et al., 2021), revealing that
+Dictionary learning (Mairal et al., 2009) is a foun-   shallow layers capture low-level features while
+dational machine learning approach that aims to        deeper layers focus on high-level patterns. Build-
+learn an overcomplete set of basis components, en-     ing on this, Gemma Scope (Lieberum et al., 2024)
+abling efficient data representation through sparse    leveraged JumpReLU SAEs (Rajamanoharan et al.,
+linear combinations. Autoencoders (Hinton and          2024b) to train separate models for each layer and
+Salakhutdinov, 2006), in contrast, are designed to     sub-layer of the Gemma 2 models (Rivière et al.,
+extract low-dimensional embeddings from high-          2024). Similarly, Llama Scope (He et al., 2024)
+dimensional data. By merging these two paradigms,      trained 256 SAEs per layer and sublayer of the
+sparse autoencoders have been developed, incor-        Llama-3.1-8B-Base model (Dubey et al., 2024), ex-
+porating sparsity constraints such as L1 regulariza-   tending layer-wise sparse modeling. Nevertheless,
+tion (Memisevic et al., 2015) to enforce sparsity      training a suite of SAEs is computationally expen-
+in learned representations. Sparse autoencoders        sive and often learns redundant features, posing
+have found widespread application across various       significant scalability challenges for larger models.
+domains of machine learning, including computer        Moreover, determining the specific SAE relevant
+vision (Wang et al., 2015) and natural language        to a given input or characteristic can be nontriv-
+processing (Chang et al., 2018).                       ial, complicating their practical application. Re-
+                                                       cently, Sparse Crosscoders (Lindsey et al., 2024)
+A.2    Sparse Autoencoder for LLMs
+                                                       introduced a cross-layer SAE variant designed to
+SAEs have emerged as effective tools for captur-       investigate layer interactions and shared features
+ing monosemantic features (Elhage et al., 2022a),      (Templeton et al., 2024; Kissane et al., 2024). This
+making them increasingly popular in LLM appli-         framework facilitates circuit-level analysis (Elhage
+cations. Early work (Huben et al., 2024) intro-        et al., 2021; Marks et al., 2024) by enabling feature
+duced SAEs for extracting interpretable features       tracking across layers, providing valuable insights
+from the internal activations of GPT-2 (Radford        into the evolution of model features and architec-
+et al., 2019). To address systematic shrinkage         tural differences. However, Crosscoder still relies
+in feature activations inherent in traditional SAEs    on separate encoders and decoders for each layer,
+(Huben et al., 2024; Bricken et al., 2023), Gated      which limits its efficiency and hinders seamless
+SAEs (Rajamanoharan et al., 2024a) were pro-           integration with downstream tasks.
+posed, decoupling feature detection from magni-           The challenges of scalability, feature localiza-
+tude estimation. TopK SAEs (Gao et al., 2024),         tion, and applicability to downstream tasks moti-
+inspired by k-sparse autoencoders (Makhzani and        vate the development of RouteSAE.
+Frey, 2014), directly controlled sparsity to enhance
+reconstruction fidelity while preserving sparse rep-   B     Comparison of Routing Mechanisms.
+resentations. JumpReLU SAEs (Rajamanoharan
+et al., 2024b) advanced the trade-off between re-      In RouteSAE, the router determines how the multi-
+construction quality and sparsity by replacing the     layer activations are integrated into the SAE. We
+conventional ReLU activation (Agarap, 2019) with       denote the routing mechanism defined in Equation
+the discontinuous JumpReLU function (Erichson          9 as hard routing.
+et al., 2020). More recently, Switch SAEs (Mu-            Hard Routing. In hard routing, the router se-
+dide et al., 2024) introduced a mixture-of-experts     lects the layer with the highest probability pi . The
+mechanism, where inputs are routed to smaller, spe-    activation xi∗ from the selected i∗ is scaled by its
+cialized SAEs, achieving better reconstruction per-    corresponding probability pi∗ and used as the input
+formance within fixed computational constraints.       to the SAE:
+However, these approaches capture the intermedi-                         xSAE = pi∗ xi∗ .                (13)
+                                                   xො hard
+                  x𝑙+1                                                                 x𝑙+1                                          z
+     Layer l+1           v                                                Layer l+1             v
+                                      p          Decoder                                                     p
+
+
+
+
+                                                                                                                           Encoder
+
+                                                                                                                                         Decoder
+                             Router
+
+
+
+
+                                                                                                    Router
+                                                                   z
+                                          i*      Encoder
+      Layer l      x𝑙                                                      Layer l      x𝑙                                                         xො soft
+                                                                                                                 xsoft = ෍ 𝑝𝑖 x𝑖
+                                               xhard = 𝑝𝑖 ∗ x𝑖 ∗
+
+                 x𝑙−1                                                                  x𝑙−1
+                 RouteSAE (hard)                                                              RouteSAE (soft)
+Figure 11: Routing mechanism comparison. Hard routing enforces sparse selection by activating only a single layer,
+whereas soft routing integrates information from all layers, weighted by their respective significance probabilities.
+
+
+   Soft Routing. As an alternative, we also explore                                  Model               Llama-3.2-1B-Instruct
+soft routing, where the router combines activations
+from all layers by weighting them with their re-                               Hidden Size                              2,048
+spective probabilities pi . Instead of selecting a                               # Layers                                16
+single layer, the input to the SAE is computed as a                           Routing Layers                           [3:11]
+weighted sum of all layer activations:                                         SAE Width                             16,384 (8x)
+                                                                                Batch Size                               64
+                             L−1
+                             X                                            Table 1: Implementation details of RouteSAEs for
+                  xSAE =              pi xi .                      (14)   Llama-3.2-1B-Instruct. Note that the layer indices start
+                             i=0                                          from 0.
+
+
+This approach allows the SAE to incorporate multi-
+layer information in a more continuous manner,
+leveraging a richer feature representation compared
+to hard routing.
+   Discussion. Hard routing enforces sparsity by
+selecting the activation from a single layer, typi-
+cally the one with the strongest response for a given
+input. This mechanism simplifies the routing task,
+as the router only needs to identify the layer with
+the highest activation. In contrast, soft routing ag-                     Figure 12: Pareto frontier of sparsity versus Norm MSE.
+                                                                          Norm MSE, as a proxy metric, cannot be directly com-
+gregates activations from all layers, weighted by
+                                                                          pared between models with distinct input distributions.
+their estimated importance scores. This introduces
+a significantly more challenging requirement: the                         C    Reconstruction Loss
+router must accurately estimate the relative contri-
+bution of each layer. Inaccurate estimations may re-                      Given a fixed sparsity L0 in the latent representa-
+sult in disproportionately high weights assigned to                       tion z, a lower reconstruction loss indicates better
+less relevant layers, which can lead to the accumula-                     performance in terms of the SAE’s ability to recon-
+tion of noisy or irrelevant activations. This, in turn,                   struct the original input. However, evaluating the
+may interfere with the disentanglement of monose-                         effectiveness of SAEs remains challenging. The
+mantic features in subsequent stages. While soft                          sparsity-reconstruction frontier is commonly used
+routing has the potential to capture cross-layer fea-                     as a proxy metric, but it should be noted that the
+tures—i.e., features that are distributed across mul-                     primary goal of SAEs is to extract interpretable
+tiple layers—our experiments thus far have not                            features, not simply to reconstruct activations. As
+demonstrated clear benefits in this setting. We plan                      shown in Figure 12, TopK SAE achieves the opti-
+to investigate this direction further in future work.                     mal sparsity-reconstruction trade-off, maintaining
+a normalized MSE of around 0.15 across sparsity                                   E     Interpretable Features Extracted by
+levels. The performance of Random, ReLU and                                             RouteSAE.
+Gated SAE is comparable, with all three methods
+showing a normalized MSE of approximately 0.25,
+significantly lagging behind TopK. Crosscoder, on
+                                                                                  In this section, we present additional interpretable
+the other hand, demonstrates a notably poorer re-
+                                                                                  features extracted by RouteSAE from Llama-3.2-
+construction frontier, with its MSE consistently
+                                                                                  1B-Instruct, including feature-activated tokens,
+around 0.35.
+                                                                                  contexts, values, and GPT-4 explanations.
+   It is important to clarify that, as a proxy met-
+ric, normalized MSE cannot be directly compared
+between models with different input distributions.
+Both RouteSAE and Crosscoder receive and recon-
+                                                                                  E.1      Low-Level Features
+struct activations from multiple layers, which leads
+to a more complex distribution compared to a single
+layer. This increased complexity makes reconstruc-                                 Feature 3675: flourish and thrive
+tion more difficult, resulting in a higher MSE loss.
+                                                                                   Explanation: The feature consistently activates on variations of the
+Nevertheless, while both Crosscoder and Route-                                     words “flourish” and “thrive”, which are semantically similar and often
+                                                                                   used interchangeably in contexts indicating growth or success. The acti-
+SAE aggregate activations across multiple layers,                                  vation values are consistently high across all instances, with no deviating
+RouteSAE exhibits significantly better reconstruc-                                 examples, indicating a clear pattern associated with word-level polysemy
+                                                                                   disambiguation related to these terms.
+tion performance than Crosscoder, trailing only                                    Contexts: Anti-Nafta rhetoric doesn’t play well in El Paso, San Anto-
+                                                                                   nio and Houston, which have become gateway cities for commerce with
+slightly behind TopK. RouteSAE maintains a nor-                                    Latin America and have flourished since the North American Free Trade
+                                                                                   Agreement passed Congress in 1993. Activation: 16.16
+malized MSE of around 0.18, demonstrating its                                      Contexts: It’s not, by the way, a song about devil-worshipping, although
+ability to handle the complexities of multi-layer                                  the Stones thrived on the controversy and didn’t do much to discourage
+                                                                                   speculation. Activation: 17.33
+reconstruction.                                                                    Contexts: When the researchers planted worn-out cattle fields in Costa
+                                                                                   Rica with a sampling of local trees, native species began to move in and
+                                                                                   flourish, raising the hope that destroyed rainforests can one day be replaced.
+                                                                                   Activation: 16.43
+
+D     Auto Intrepretation Prompt Design.
+                                                                                   Feature 3896: academic or job application
+
+ Background                                                                        Explanation: The feature consistently activates on tokens related to
+ We are analyzing the activation levels of features in a neural network, where     the context of academic or job application processes, specifically focusing
+ each feature activates certain tokens in a text. Each token’s activation value    on “applicant” and “interviews.” There is a clear pattern with no deviat-
+ indicates its relevance to the feature, with higher values showing stronger       ing examples, indicating a strong association with word-level polysemy
+ association. Features are categorized as:                                         disambiguation related to the application process.
+ A. Low-level features, which are associated with word-level polysemy              Contexts: ON a Sunday morning a few months back, I interviewed my
+ disambiguation (e.g., "crushed things", "Europe").                                final Harvard applicant of the year. Activation: 15.97
+ B. High-level features, which are associated with long-range pattern              Contexts: Then you have to advertise a position or opportunity, and
+ formation (e.g., "enumeration", "one of the [number/quantifier]")                 weed through the applicants to find the 5% that are actually worth talking
+ C. Undiscernible features, which are associated with noise or irrelevant          to. Activation: 15.80
+ patterns.                                                                         Contexts: I might be smart and qualified, but for some random reason I
+                                                                                   may do poorly in the interviews and not get an offer! Activation: 15.45
+
+
+
+
+ Task description                                                                  Feature 4574: spatial or temporal prepositions
+ Your task is to classify the feature as low-level, high-level or undiscernible
+ and give this feature a monosemanticity score based on the following
+ scoring rubric:                                                                   Explanation: The feature consistently activates on the tokens “in” and
+ Activation Consistency                                                            “within”, indicating a strong association with spatial or temporal prepositions.
+ 5: Clear pattern with no deviating examples                                       The activations are highly consistent across different contexts, showing no
+ 4: Clear pattern with one or two deviating examples                               deviating examples, which suggests a clear pattern related to the usage of
+ 3: Clear overall pattern but quite a few examples not fitting that pattern        these prepositions. This aligns with low-level features focused on word-level
+ 2: Broad consistent theme but lacking structure                                   polysemy disambiguation.
+ 1: No discernible pattern                                                         Contexts: The show was getting huge, and just as with COMDEX, the
+ Consider the following activations for a feature in the neural network.           show-within-a-show was born. Activation: 17.48
+ Token: ... Activation: ... Context: ...                                           Contexts: According to a Circuit City employee in Chicago, the con-
+                                                                                   sumer electronics chain is trading in HD DVD players bought into their
+ Question                                                                          stores “within 3 months of the announcement”, as opposed to their 30-day
+ Provide your response in the following fixed format:                              return policy. Activation: 28.23
+ Feature category: [Low-level/High-level/Undiscernible]                            Contexts: There’s now at least a 50% risk that prices will decline within
+ Score: [5/4/3/2/1]                                                                two years in 11 major metro areas, including San Diego; Boston; Long
+ Explanation: [Your brief explanation]                                             Island, N.Y.; Los Angeles; and San Francisco, according to PMI Mortgage
+                                                                                   Insurance’s latest U.S. Activation: 29.30
+E.2     High-Level Features
+ Feature 19: enumeration or distribution
+
+ Explanation: The feature consistently activates tokens that are part of
+a pattern involving enumeration or distribution, such as “each”, “neither”,
+“all”, and “both”. These tokens are often used in contexts where items or
+actions are being listed or compared, indicating a high-level feature related
+to long-range pattern formation. The activations show a clear pattern with
+no deviating examples, suggesting a strong monosemanticity.
+Contexts: A caller, discussing how Clinton and Obama are both ter-
+rifying or whatever, made the comment that “my 12-year-old says that
+Obama looks like Curious George!” As my jaw hit the steering wheel, Rush
+chuckled and they moved on to the next topic. Activation: 17.73
+Contexts: Advanced Graphics Card Repair Now that you have already
+learned how to repair broken capacitors and inductors on your graphics
+cards (or any other boards), it’s time to move on to the smaller components
+that are harder to tackle. Activation: 16.62
+Contexts: Creating a useful command line tool Now that we have the
+basics out of the way, we can move onto creating a tool to solve a specific
+problem. Activation: 16.37
+
+
+ Feature 1424: date expressions
+
+ Explanation: The activations consistently highlight tokens that are part
+of date expressions, specifically the day of the month in a date format (e.g.,
+“January 1”, “February 28”, “March 31”). This indicates a clear pattern
+of recognizing and activating on numerical day components within date
+contexts, which aligns with high-level features associated with long-range
+pattern formation, such as recognizing structured data formats like dates.
+There are no deviating examples, hence the highest score for activation
+consistency.
+Contexts: As of January 1, more than one of every 100 adults is behind
+bars, about half of them Black. Activation: 22.78
+Contexts: The Random Destructive Acts FAQ Updated March 19, 2003:
+It has been about 8 years since I wrote this page (before 2002 the last
+modification date was June 30, 1995) and I still get emails about it every
+few days. Activation: 20.76
+Contexts: Taguba, USA (Ret.) served 34 years on active duty until his
+retirement on 1 January 2007. Activation: 15.03
+
+
+ Feature 2271: comparative or equality expressions
+
+ Explanation: The activations consistently highlight tokens that are part
+ of comparative or equality expressions, such as “just as [adjective/adverb] as”
+ and “equal [noun].” This indicates a clear pattern of identifying long-range
+ patterns related to comparisons and equality, with no deviating examples.
+ Contexts: a big Obama supporter, and I would have voted the old John
+ McCain over Hillary Clinton (but not the new, party-line-toeing, I’m-just-
+ as-conservative-as-Bush-I-swear John McCain). Activation: 18.64
+ Contexts: Equally important, it represents the anticipation of how much
+ new money will be created in the future. Activation: 18.11
+ Contexts: It was important to us to have an equal amount of diversity in
+ the cast. Activation: 16.23
+
